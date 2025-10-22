@@ -1,0 +1,39 @@
+# Source files
+src/
+tsconfig.json
+jest.config.js
+
+# Examples
+examples/
+
+# Tests
+tests/
+coverage/
+*.test.ts
+*.spec.ts
+test-*.js
+test-*.ts
+
+# Documentation (keep only README.md)
+CONTRIBUTING.md
+
+# Development files
+.env
+.env.example
+.vscode/
+.idea/
+.claude/
+
+# Git
+.git/
+.gitignore
+
+# Logs
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Build artifacts
+*.tsbuildinfo
