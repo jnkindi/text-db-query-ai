@@ -1,0 +1,47 @@
+text-db-query-ai
+Copyright (c) 2025 jnkindi
+
+This software contains code from several open source projects:
+
+--------------------------------------------------------------------------------
+
+OpenAI Node.js SDK
+Copyright (c) 2023 OpenAI
+License: Apache-2.0
+Repository: https://github.com/openai/openai-node
+
+--------------------------------------------------------------------------------
+
+Anthropic TypeScript SDK
+Copyright (c) 2023 Anthropic
+License: MIT
+Repository: https://github.com/anthropics/anthropic-sdk-typescript
+
+--------------------------------------------------------------------------------
+
+Additional Dependencies:
+
+This software also includes dependencies licensed under:
+- MIT License (341 packages)
+- ISC License (62 packages)
+- BSD-3-Clause License (15 packages)
+- BSD-2-Clause License (4 packages)
+- Apache-2.0 License (9 packages)
+
+For a complete list of dependencies and their licenses, run:
+  npx license-checker --production
+
+All third-party licenses are available in their respective packages within the
+node_modules directory and are preserved in distributed versions of this software.
+
+--------------------------------------------------------------------------------
+
+SECURITY NOTICE:
+
+This package uses environment variables for API key management. Users must:
+1. Never commit .env files containing actual API keys
+2. Keep .env in .gitignore
+3. Rotate API keys if exposed
+4. Use appropriate access controls for production deployments
+
+For security concerns, please see SECURITY.md or contact the maintainers.

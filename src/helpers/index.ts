@@ -3,10 +3,8 @@
  */
 
 export {
-  createFromSequelize,
   createFromPrisma,
   createFromDatabase,
-  createChatbotFromSequelize,
   createChatbotFromPrisma,
   createChatbotFromDatabase,
   ChatbotHelper,

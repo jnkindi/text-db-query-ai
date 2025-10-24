@@ -20,8 +20,6 @@ export { createLLMProvider, BaseLLMProvider, OpenAIProvider, ClaudeProvider } fr
 
 // ORM Adapters
 export {
-  SequelizeAdapter,
-  createSequelizeAdapter,
   PrismaAdapter,
   createPrismaAdapter,
   parsePrismaSchema,
@@ -33,10 +31,8 @@ export type { ORMAdapter, SchemaExtractionOptions } from './adapters';
 
 // Easy setup helpers
 export {
-  createFromSequelize,
   createFromPrisma,
   createFromDatabase,
-  createChatbotFromSequelize,
   createChatbotFromPrisma,
   createChatbotFromDatabase,
   ChatbotHelper,

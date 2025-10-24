@@ -5,7 +5,6 @@
 import { QueryGenerator } from '../generator';
 import { TextToQueryConfig, LLMProvider, SecurityConfig } from '../types';
 import {
-  SequelizeAdapter,
   PrismaAdapter,
   DatabaseIntrospectionAdapter,
   SchemaExtractionOptions,
@@ -20,39 +19,6 @@ export interface EasySetupConfig {
   model?: string;
   security?: SecurityConfig;
   debug?: boolean;
-}
-
-/**
- * Create a query generator from Sequelize models
- *
- * @example
- * ```typescript
- * const generator = await createFromSequelize(sequelize, {
- *   llmProvider: 'openai',
- *   apiKey: process.env.OPENAI_API_KEY!,
- * });
- * ```
- */
-export async function createFromSequelize(
-  sequelize: any,
-  config: EasySetupConfig,
-  options?: SchemaExtractionOptions
-): Promise<QueryGenerator> {
-  const adapter = new SequelizeAdapter(sequelize, options);
-  const schema = await adapter.extractSchema();
-
-  const generatorConfig: TextToQueryConfig = {
-    llm: {
-      provider: config.llmProvider,
-      apiKey: config.apiKey,
-      model: config.model,
-    },
-    database: schema,
-    security: config.security,
-    debug: config.debug,
-  };
-
-  return new QueryGenerator(generatorConfig);
 }
 
 /**
@@ -131,11 +97,11 @@ export async function createFromDatabase(
  */
 export class ChatbotHelper {
   private generator: QueryGenerator;
-  private adapter: SequelizeAdapter | PrismaAdapter | DatabaseIntrospectionAdapter;
+  private adapter: PrismaAdapter | DatabaseIntrospectionAdapter;
 
   constructor(
     generator: QueryGenerator,
-    adapter: SequelizeAdapter | PrismaAdapter | DatabaseIntrospectionAdapter
+    adapter: PrismaAdapter | DatabaseIntrospectionAdapter
   ) {
     this.generator = generator;
     this.adapter = adapter;
@@ -197,32 +163,6 @@ export class ChatbotHelper {
       results: Array.isArray(results) ? results : [results],
     };
   }
-}
-
-/**
- * Create a complete chatbot helper from Sequelize
- */
-export async function createChatbotFromSequelize(
-  sequelize: any,
-  config: EasySetupConfig,
-  options?: SchemaExtractionOptions
-): Promise<ChatbotHelper> {
-  const adapter = new SequelizeAdapter(sequelize, options);
-  const schema = await adapter.extractSchema();
-
-  const generatorConfig: TextToQueryConfig = {
-    llm: {
-      provider: config.llmProvider,
-      apiKey: config.apiKey,
-      model: config.model,
-    },
-    database: schema,
-    security: config.security,
-    debug: config.debug,
-  };
-
-  const generator = new QueryGenerator(generatorConfig);
-  return new ChatbotHelper(generator, adapter);
 }
 
 /**

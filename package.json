@@ -1,6 +1,6 @@
 {
   "name": "text-db-query-ai",
-  "version": "1.0.0",
+  "version": "0.0.1",
   "description": "Secure, intelligent text-to-database query converter with LLM integration for building AI-powered chatbots",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -11,9 +11,23 @@
     "email": "jacknyilinkindi@gmail.com",
     "url": "https://github.com/jnkindi"
   },
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/jnkindi/text-db-query-ai.git"
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    "NOTICE"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "test": "jest",
+    "test:watch": "jest --watch",
+    "test:coverage": "jest --coverage",
+    "test:verbose": "jest --verbose",
+    "test:security": "jest tests/security",
+    "test:integration": "jest tests/integration",
+    "lint": "echo 'Linting...'",
+    "prepublishOnly": "npm run build && npm run test"
   },
   "bugs": {
     "url": "https://github.com/jnkindi/text-db-query-ai/issues"
@@ -29,7 +43,6 @@
     "chatbot",
     "text-to-sql",
     "natural-language",
-    "sequelize",
     "prisma",
     "orm",
     "postgresql",
@@ -37,50 +50,20 @@
     "sqlite",
     "sql-generator"
   ],
-  "engines": {
-    "node": ">=18.0.0"
-  },
-  "type": "commonjs",
-  "files": [
-    "dist",
-    "README.md",
-    "LICENSE"
-  ],
-  "exports": {
-    ".": {
-      "require": "./dist/index.js",
-      "types": "./dist/index.d.ts",
-      "default": "./dist/index.js"
-    }
-  },
-  "scripts": {
-    "build": "tsc",
-    "dev": "tsc --watch",
-    "test": "jest",
-    "test:watch": "jest --watch",
-    "test:coverage": "jest --coverage",
-    "test:verbose": "jest --verbose",
-    "test:security": "jest tests/security",
-    "test:integration": "jest tests/integration",
-    "lint": "echo 'Linting...'",
-    "prepublishOnly": "npm run build && npm run test"
-  },
+  "author": "jnkindi",
+  "license": "MIT",
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.30.0",
-    "openai": "^4.70.0"
+    "@anthropic-ai/sdk": "^0.67.0",
+    "openai": "^6.7.0"
   },
   "peerDependencies": {
     "@prisma/client": "^5.0.0",
     "mysql2": "^3.0.0",
     "pg": "^8.0.0",
     "prisma": "^5.0.0",
-    "sequelize": "^6.0.0",
     "sqlite3": "^5.0.0"
   },
   "peerDependenciesMeta": {
-    "sequelize": {
-      "optional": true
-    },
     "prisma": {
       "optional": true
     },
@@ -103,13 +86,21 @@
     "@types/pg": "^8.10.9",
     "jest": "^29.7.0",
     "pg": "^8.11.0",
-    "sequelize": "^6.35.0",
+    "prisma": "^5.22.0",
+    "@prisma/client": "^5.22.0",
     "sqlite3": "^5.1.7",
     "ts-jest": "^29.1.0",
     "typescript": "^5.3.0"
   },
-  "publishConfig": {
-    "access": "public",
-    "registry": "https://registry.npmjs.org/"
+  "engines": {
+    "node": ">=16.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jnkindi/text-db-query-ai.git"
+  },
+  "homepage": "https://github.com/jnkindi/text-db-query-ai#readme",
+  "bugs": {
+    "url": "https://github.com/jnkindi/text-db-query-ai/issues"
   }
 }
