@@ -4,6 +4,10 @@
  */
 
 import { DatabaseIntrospectionAdapter } from '../../src/adapters';
+import { introspectSchema } from '../../src/adapters/introspection';
+import { IntrospectionExecutor } from '../../src/adapters/types';
+import { QueryGenerator } from '../../src/generator/query-generator';
+import { BaseLLMProvider } from '../../src/providers/base';
 import { TableSchema } from '../../src/types';
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -159,6 +163,139 @@ describeSqlite3(sqlite3Title, () => {
   });
 });
 
+/** Generated columns (SQLite 3.31+), which queries can select, and a virtual table with hidden columns. */
+const GENERATED_DDL = `
+  CREATE TABLE line (
+    id INTEGER PRIMARY KEY,
+    price REAL,
+    qty INT,
+    total REAL GENERATED ALWAYS AS (price * qty) STORED,
+    label TEXT AS ('L' || id) VIRTUAL
+  );
+  CREATE VIRTUAL TABLE docs USING fts5(body);
+  INSERT INTO line (price, qty) VALUES (2.5, 4);
+`;
+
+/** Answers with fixed SQL and counts the generateWithSystem() calls. */
+class CountingProvider extends BaseLLMProvider {
+  calls = 0;
+  constructor(private readonly answers: string[]) {
+    super({ provider: 'openai', apiKey: 'sk-regression-test' });
+  }
+  async generate(): Promise<string> {
+    throw new Error('generate() is not used by the generator');
+  }
+  async generateWithSystem(): Promise<string> {
+    this.calls++;
+    const next = this.answers.shift();
+    if (next === undefined) throw new Error('no answer left');
+    return next;
+  }
+  async validateApiKey(): Promise<boolean> {
+    return true;
+  }
+  getDefaultModel(): string {
+    return 'counting';
+  }
+}
+
+const columnNames = (tables: TableSchema[], name: string) => tables.find((t) => t.name === name)?.columns.map((c) => c.name);
+
+describeSqlite3(`generated columns, ${sqlite3Title}`, () => {
+  let db: any;
+
+  const all = (sql: string, params: unknown[] = []): Promise<Record<string, unknown>[]> =>
+    new Promise((resolve, reject) => db.all(sql, params, (err: Error | null, rows: any[]) => (err ? reject(err) : resolve(rows))));
+
+  /**
+   * The same database as an older SQLite sees it: no pragma_table_xinfo before
+   * 3.26, no table-valued pragmas at all before 3.16. Unknown PRAGMA statements
+   * are ignored there, returning no rows.
+   */
+  function olderSqlite(version: '3.25' | '3.15'): { execute: IntrospectionExecutor; calls: string[] } {
+    const calls: string[] = [];
+    const execute: IntrospectionExecutor = async (sql, params) => {
+      calls.push(sql);
+      const tableValued = /\b(pragma_\w+)\(/.exec(sql)?.[1];
+      if (tableValued === 'pragma_table_xinfo' || (tableValued && version === '3.15')) {
+        throw new Error(`SQLITE_ERROR: no such table: ${tableValued}`);
+      }
+      if (/^\s*PRAGMA table_xinfo\b/i.test(sql)) return [];
+      return all(sql, params as unknown[]);
+    };
+    return { execute, calls };
+  }
+
+  beforeAll(async () => {
+    db = new sqlite3.module.Database(':memory:');
+    await new Promise<void>((resolve, reject) => db.exec(GENERATED_DDL, (err: Error | null) => (err ? reject(err) : resolve())));
+  });
+
+  afterAll(() => new Promise<void>((resolve) => db.close(() => resolve())));
+
+  it('includes stored and virtual generated columns, without virtual table hidden columns, in 2 queries', async () => {
+    const spy = jest.spyOn(db, 'all');
+    try {
+      const schema = await new DatabaseIntrospectionAdapter(db, 'sqlite').extractSchema();
+      const line = schema.tables.find((t) => t.name === 'line')!;
+      expect(line.columns).toEqual([
+        { name: 'id', type: 'integer', nullable: false, sensitive: false, nativeType: 'INTEGER' },
+        { name: 'price', type: 'varchar', nullable: true, sensitive: false, nativeType: 'REAL' },
+        { name: 'qty', type: 'integer', nullable: true, sensitive: false, nativeType: 'INT' },
+        { name: 'total', type: 'varchar', nullable: true, sensitive: false, nativeType: 'REAL' },
+        { name: 'label', type: 'text', nullable: true, sensitive: false, nativeType: 'TEXT' },
+      ]);
+      expect(columnNames(schema.tables, 'docs')).toEqual(['body']);
+      expect(spy).toHaveBeenCalledTimes(2);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('accepts a query on generated columns without a correction, and strict mode does not throw', async () => {
+    const schema = await new DatabaseIntrospectionAdapter(db, 'sqlite').extractSchema();
+    const provider = new CountingProvider(['SELECT id, total, label FROM line']);
+    const generator = new QueryGenerator({
+      llm: { provider: 'openai', apiKey: 'sk-regression-test' },
+      llmProvider: provider,
+      database: schema,
+      identifierCheck: 'strict',
+      security: { requireUserContext: false },
+    });
+
+    const result = await generator.generateQuery('line totals');
+    expect(result.query).toBe('SELECT id, total, label FROM line');
+    expect(provider.calls).toBe(1);
+    await expect(all(result.query)).resolves.toEqual([{ id: 1, total: 10, label: 'L1' }]);
+  });
+
+  it('reads the columns pragma_table_info knows on SQLite 3.16 to 3.25', async () => {
+    const { execute, calls } = olderSqlite('3.25');
+    const { tables } = await introspectSchema(execute, 'sqlite');
+    expect(columnNames(tables, 'line')).toEqual(['id', 'price', 'qty']);
+    expect(columnNames(tables, 'docs')).toEqual(['body']);
+    expect(calls).toHaveLength(3);
+  });
+
+  it('falls back to PRAGMA table_info per table before SQLite 3.16', async () => {
+    const { execute } = olderSqlite('3.15');
+    const { tables } = await introspectSchema(execute, 'sqlite');
+    expect(columnNames(tables, 'line')).toEqual(['id', 'price', 'qty']);
+    expect(columnNames(tables, 'docs')).toEqual(['body']);
+  });
+
+  it('reads generated columns per table when only the bulk query fails', async () => {
+    // As with a virtual table whose module is not loaded: every joined pragma fails.
+    const execute: IntrospectionExecutor = async (sql, params) => {
+      if (/\bJOIN pragma_/.test(sql)) throw new Error('SQLITE_ERROR: no such module: vec0');
+      return all(sql, params as unknown[]);
+    };
+    const { tables } = await introspectSchema(execute, 'sqlite');
+    expect(columnNames(tables, 'line')).toEqual(['id', 'price', 'qty', 'total', 'label']);
+    expect(columnNames(tables, 'docs')).toEqual(['body']);
+  });
+});
+
 const nodeSqlite = load('node:sqlite');
 const describeNodeSqlite = nodeSqlite.module?.DatabaseSync ? describe : describe.skip;
 
@@ -169,6 +306,18 @@ describeNodeSqlite('node:sqlite (in-memory)', () => {
       db.exec(DDL);
       const schema = await new DatabaseIntrospectionAdapter(db, 'sqlite').extractSchema();
       expect(schema).toEqual({ databaseType: 'sqlite', tables: EXPECTED, exactNames: true });
+    } finally {
+      db.close();
+    }
+  });
+
+  it('includes generated columns', async () => {
+    const db = new nodeSqlite.module.DatabaseSync(':memory:');
+    try {
+      db.exec(GENERATED_DDL);
+      const schema = await new DatabaseIntrospectionAdapter(db, 'sqlite').extractSchema();
+      expect(columnNames(schema.tables, 'line')).toEqual(['id', 'price', 'qty', 'total', 'label']);
+      expect(columnNames(schema.tables, 'docs')).toEqual(['body']);
     } finally {
       db.close();
     }

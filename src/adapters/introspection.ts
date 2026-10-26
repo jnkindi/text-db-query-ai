@@ -217,7 +217,24 @@ export const INTROSPECTION_SQL = {
   sqlite: {
     // Tables and columns in one statement (table-valued pragmas need SQLite 3.16+).
     // The table name is passed by the join, so reserved names such as "order" need no quoting.
+    // table_xinfo (3.26+) also lists generated columns, which queries can select:
+    // hidden 2 is VIRTUAL, 3 is STORED. Hidden 1, the hidden columns of virtual
+    // tables, is left out, as table_info leaves it out.
     columns: `
+      SELECT m.name AS table_name,
+             p.cid AS cid,
+             p.name AS column_name,
+             p.type AS data_type,
+             p."notnull" AS not_null,
+             p.pk AS pk
+      FROM sqlite_master AS m
+      JOIN pragma_table_xinfo(m.name) AS p
+      WHERE m.type = 'table'
+        AND m.name NOT LIKE 'sqlite\\_%' ESCAPE '\\'
+        AND p.hidden IN (0, 2, 3)
+      ORDER BY m.name, p.cid`,
+    // The same for SQLite 3.16 to 3.25, which has no table_xinfo and no generated columns.
+    legacyColumns: `
       SELECT m.name AS table_name,
              p.cid AS cid,
              p.name AS column_name,
@@ -306,9 +323,10 @@ export const INTROSPECTION_SQL = {
 } as const;
 
 /**
- * SQLite statements for the per-table fallback, used only when the bulk query
- * fails: SQLite before 3.16 (no table-valued pragmas), or a virtual table whose
+ * SQLite statements for the per-table fallback, used only when the bulk queries
+ * fail: SQLite before 3.16 (no table-valued pragmas), or a virtual table whose
  * module is not loaded, which makes the joined pragma fail for every table.
+ * table_xinfo is tried before table_info, for generated columns on 3.26+.
  */
 export const SQLITE_FALLBACK_SQL = {
   tables: `
@@ -317,9 +335,13 @@ export const SQLITE_FALLBACK_SQL = {
       WHERE type = 'table'
         AND name NOT LIKE 'sqlite\\_%' ESCAPE '\\'
       ORDER BY name`,
+  tableXinfo: (table: string): string => `PRAGMA table_xinfo(${quoteSqliteIdentifier(table)})`,
   tableInfo: (table: string): string => `PRAGMA table_info(${quoteSqliteIdentifier(table)})`,
   foreignKeyList: (table: string): string => `PRAGMA foreign_key_list(${quoteSqliteIdentifier(table)})`,
 };
+
+/** table_xinfo `hidden` values of columns a query can select: ordinary, VIRTUAL and STORED generated. */
+const SQLITE_SELECTABLE_HIDDEN: ReadonlySet<number> = new Set([0, 2, 3]);
 
 const DOUBLE_QUOTE = /"/g;
 
@@ -353,8 +375,8 @@ export function normalizeDataType(type: string): string {
  * Read the schema of a database through `execute`.
  *
  * Runs a constant number of queries, whatever the number of tables: 5 for
- * postgres (4 with `includeEnumValues: false`), 3 for mysql, 2 for sqlite, and
- * 5 for mssql (4 with `includeDescriptions: false`). The table and column
+ * postgres (4 with `includeEnumValues: false`), 3 for mysql, 2 for sqlite (3
+ * before SQLite 3.26), and 5 for mssql (4 with `includeDescriptions: false`). The table and column
  * queries must succeed. The key, enum and description queries are best effort,
  * as in 0.0.1: if one fails, that information is left out.
  *
@@ -584,7 +606,10 @@ async function readSqlite(run: RowRunner): Promise<RawSchema> {
   let columnRows: Row[];
   let fkRows: Row[];
   try {
-    [columnRows, fkRows] = await Promise.all([run(sql.columns), bestEffort(run(sql.foreignKeys))]);
+    // Without pragma_table_xinfo (before 3.26), pragma_table_info still reads every
+    // other column. When both fail, the pragma_table_info error is the one to report.
+    const bulkColumns = run(sql.columns).catch(() => run(sql.legacyColumns));
+    [columnRows, fkRows] = await Promise.all([bulkColumns, bestEffort(run(sql.foreignKeys))]);
   } catch (error) {
     // Report the bulk query's error if the fallback cannot even list the tables.
     ({ columnRows, fkRows } = await readSqliteFallback(run).catch(() => Promise.reject(error)));
@@ -639,10 +664,7 @@ async function readSqliteFallback(run: RowRunner): Promise<{ columnRows: Row[]; 
   const tableNames = (await run(SQLITE_FALLBACK_SQL.tables)).map((row) => text(row.table_name));
   const perTable = await Promise.all(
     tableNames.map((table) =>
-      Promise.all([
-        run(SQLITE_FALLBACK_SQL.tableInfo(table)).catch((): Row[] | undefined => undefined),
-        bestEffort(run(SQLITE_FALLBACK_SQL.foreignKeyList(table))),
-      ])
+      Promise.all([readSqliteTableColumns(run, table), bestEffort(run(SQLITE_FALLBACK_SQL.foreignKeyList(table)))])
     )
   );
 
@@ -675,6 +697,20 @@ async function readSqliteFallback(run: RowRunner): Promise<{ columnRows: Row[]; 
   });
 
   return { columnRows, fkRows };
+}
+
+/**
+ * The columns of one table: PRAGMA table_xinfo, with generated columns, then
+ * PRAGMA table_info. SQLite before 3.26 ignores the unknown table_xinfo and
+ * returns no rows, and no table has zero columns, so no rows means "try
+ * table_info". Undefined when neither can be read.
+ */
+async function readSqliteTableColumns(run: RowRunner, table: string): Promise<Row[] | undefined> {
+  const xinfo = await run(SQLITE_FALLBACK_SQL.tableXinfo(table)).catch((): Row[] | undefined => undefined);
+  if (xinfo && xinfo.length > 0) {
+    return xinfo.filter((row) => SQLITE_SELECTABLE_HIDDEN.has(Number(row.hidden)));
+  }
+  return run(SQLITE_FALLBACK_SQL.tableInfo(table)).catch((): Row[] | undefined => undefined);
 }
 
 // ---------------------------------------------------------------------------

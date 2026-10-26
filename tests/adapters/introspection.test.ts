@@ -270,7 +270,10 @@ describe('introspectSchema', () => {
     });
 
     it('sqlite joins sqlite_master with the table-valued pragmas and skips sqlite_ tables', () => {
-      expect(sqlite.columns).toContain('JOIN pragma_table_info(m.name) AS p');
+      // table_xinfo lists generated columns (hidden 2 and 3), not the hidden columns of virtual tables (1).
+      expect(sqlite.columns).toContain('JOIN pragma_table_xinfo(m.name) AS p');
+      expect(sqlite.columns).toContain('p.hidden IN (0, 2, 3)');
+      expect(sqlite.legacyColumns).toContain('JOIN pragma_table_info(m.name) AS p');
       expect(sqlite.foreignKeys).toContain('JOIN pragma_foreign_key_list(m.name) AS f');
       for (const sql of Object.values(sqlite)) {
         expect(sql).toContain("m.name NOT LIKE 'sqlite\\_%' ESCAPE '\\'");
@@ -381,16 +384,35 @@ describe('introspectSchema', () => {
     expect(tables[1].foreignKeys).toBeUndefined();
   });
 
+  describe('SQLite before 3.26 (no pragma_table_xinfo)', () => {
+    it('reads columns with pragma_table_info, in 3 queries', async () => {
+      const catalog = sqliteCatalog(2);
+      catalog[INTROSPECTION_SQL.sqlite.legacyColumns] = catalog[INTROSPECTION_SQL.sqlite.columns];
+      catalog[INTROSPECTION_SQL.sqlite.columns] = () => { throw new Error('SQLITE_ERROR: no such table: pragma_table_xinfo'); };
+      const { execute, calls } = fakeExecutor(catalog);
+
+      const { tables } = await introspectSchema(execute, 'sqlite');
+      expect(tables.map((t) => t.columns.map((c) => c.name))).toEqual([
+        ['id', 'label', 'parent_id', 'status'],
+        ['id', 'label', 'parent_id', 'status'],
+      ]);
+      expect(calls).toHaveLength(3);
+    });
+  });
+
   describe('SQLite without table-valued pragmas', () => {
-    /** Answers the per-table PRAGMA statements; the bulk query fails as on SQLite < 3.16. */
+    /** Answers the per-table PRAGMA statements; the bulk queries fail as on SQLite < 3.16. */
     function oldSqlite(count: number, broken: string[] = []): Record<string, Handler> {
       const tables = [...names(count), 'order'];
       const handlers: Record<string, Handler> = {
-        [INTROSPECTION_SQL.sqlite.columns]: () => { throw new Error('SQLITE_ERROR: no such table: pragma_table_info'); },
+        [INTROSPECTION_SQL.sqlite.columns]: () => { throw new Error('SQLITE_ERROR: no such table: pragma_table_xinfo'); },
+        [INTROSPECTION_SQL.sqlite.legacyColumns]: () => { throw new Error('SQLITE_ERROR: no such table: pragma_table_info'); },
         [INTROSPECTION_SQL.sqlite.foreignKeys]: () => { throw new Error('SQLITE_ERROR: no such table: pragma_foreign_key_list'); },
         [SQLITE_FALLBACK_SQL.tables]: () => tables.map((t) => ({ table_name: t })),
       };
       for (const t of tables) {
+        // SQLite ignores a PRAGMA it does not know: no rows, no error.
+        handlers[SQLITE_FALLBACK_SQL.tableXinfo(t)] = () => [];
         handlers[SQLITE_FALLBACK_SQL.tableInfo(t)] = () => {
           if (broken.includes(t)) throw new Error('SQLITE_ERROR: no such module: fts5');
           return [
@@ -410,7 +432,9 @@ describe('introspectSchema', () => {
 
       expect(SQLITE_FALLBACK_SQL.tableInfo('order')).toBe('PRAGMA table_info("order")');
       expect(SQLITE_FALLBACK_SQL.tableInfo('a"b')).toBe('PRAGMA table_info("a""b")');
-      expect(calls).toHaveLength(2 + 1 + 3 * 2);
+      expect(SQLITE_FALLBACK_SQL.tableXinfo('a"b')).toBe('PRAGMA table_xinfo("a""b")');
+      // 3 bulk queries, the table list, then table_xinfo, table_info and foreign_key_list per table.
+      expect(calls).toHaveLength(3 + 1 + 3 * 3);
       expect(tables.map((t) => t.name)).toEqual(['t0', 't1', 'order']);
       expect(tables[2]).toEqual({
         name: 'order',
@@ -433,7 +457,42 @@ describe('introspectSchema', () => {
     it('reports the bulk query error when the fallback fails too', async () => {
       const catalog = sqliteCatalog(1);
       catalog[INTROSPECTION_SQL.sqlite.columns] = () => { throw new Error('SQLITE_CORRUPT: database disk image is malformed'); };
+      catalog[INTROSPECTION_SQL.sqlite.legacyColumns] = catalog[INTROSPECTION_SQL.sqlite.columns];
       await expect(introspectSchema(fakeExecutor(catalog).execute, 'sqlite')).rejects.toThrow('SQLITE_CORRUPT');
+    });
+
+    it('reports the pragma_table_info error, not the missing pragma_table_xinfo, on SQLite 3.16 to 3.25', async () => {
+      const catalog = sqliteCatalog(1);
+      catalog[INTROSPECTION_SQL.sqlite.columns] = () => { throw new Error('SQLITE_ERROR: no such table: pragma_table_xinfo'); };
+      catalog[INTROSPECTION_SQL.sqlite.legacyColumns] = () => { throw new Error('SQLITE_CORRUPT: database disk image is malformed'); };
+      await expect(introspectSchema(fakeExecutor(catalog).execute, 'sqlite')).rejects.toThrow('SQLITE_CORRUPT');
+    });
+
+    it('reads generated columns per table with table_xinfo, without hidden virtual table columns', async () => {
+      const handlers: Record<string, Handler> = {
+        [INTROSPECTION_SQL.sqlite.columns]: () => { throw new Error('SQLITE_ERROR: no such module: vec0'); },
+        [INTROSPECTION_SQL.sqlite.legacyColumns]: () => { throw new Error('SQLITE_ERROR: no such module: vec0'); },
+        [INTROSPECTION_SQL.sqlite.foreignKeys]: () => { throw new Error('SQLITE_ERROR: no such module: vec0'); },
+        [SQLITE_FALLBACK_SQL.tables]: () => [{ table_name: 'docs' }, { table_name: 'line' }],
+        [SQLITE_FALLBACK_SQL.tableXinfo('docs')]: () => [
+          { cid: 0, name: 'body', type: '', notnull: 0, pk: 0, hidden: 0 },
+          { cid: 1, name: 'docs', type: '', notnull: 0, pk: 0, hidden: 1 },
+        ],
+        [SQLITE_FALLBACK_SQL.tableXinfo('line')]: () => [
+          { cid: 0, name: 'id', type: 'INTEGER', notnull: 0, pk: 1, hidden: 0 },
+          { cid: 1, name: 'total', type: 'REAL', notnull: 0, pk: 0, hidden: 3 },
+          { cid: 2, name: 'label', type: 'TEXT', notnull: 0, pk: 0, hidden: 2 },
+        ],
+        [SQLITE_FALLBACK_SQL.foreignKeyList('docs')]: () => [],
+        [SQLITE_FALLBACK_SQL.foreignKeyList('line')]: () => [],
+      };
+      const { execute, calls } = fakeExecutor(handlers);
+      const { tables } = await introspectSchema(execute, 'sqlite');
+      expect(tables.map((t) => [t.name, t.columns.map((c) => c.name)])).toEqual([
+        ['docs', ['body']],
+        ['line', ['id', 'total', 'label']],
+      ]);
+      expect(calls.map((c) => c.sql)).not.toContain(SQLITE_FALLBACK_SQL.tableInfo('line'));
     });
   });
 
