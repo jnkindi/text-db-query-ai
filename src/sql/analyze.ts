@@ -456,7 +456,11 @@ class StatementAnalyzer {
   private isStatementUse(k: number): boolean {
     const next = this.t[k + 1];
     if (!next) return false;
-    if (next.type === 'word') return !EXPR_CONTINUATION.has(next.value);
+    if (next.type === 'word') {
+      // T-SQL join hint `OPTION (MERGE JOIN)` is not a MERGE statement
+      if (next.value === 'JOIN' && this.t[k].value === 'MERGE') return false;
+      return !EXPR_CONTINUATION.has(next.value);
+    }
     return next.type === 'quoted' || next.type === 'string' || next.type === 'number' || next.type === 'param';
   }
 
