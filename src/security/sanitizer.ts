@@ -697,9 +697,12 @@ export class QuerySanitizer {
   }
 
   /**
-   * T-SQL has no LIMIT: insert `TOP n` into each SELECT branch, or add
-   * `FETCH NEXT n ROWS ONLY` after an OFFSET clause (TOP and OFFSET cannot be
-   * combined). Returns false when nothing could be added.
+   * T-SQL has no LIMIT: insert `TOP n` after SELECT, or add `FETCH NEXT n ROWS
+   * ONLY` after an OFFSET clause (TOP and OFFSET cannot be combined). A set
+   * operation is limited as a whole with `OFFSET 0 ROWS FETCH NEXT n ROWS ONLY`,
+   * since TOP in each branch would allow n rows per branch; it needs an ORDER
+   * BY, which may only name select-list columns there, so `ORDER BY 1` is added
+   * when there is none. Returns false when nothing could be added.
    */
   private mssqlLimit(shape: Shape, n: string, edits: TextEdit[]): boolean {
     const { t, depth } = shape;
@@ -715,7 +718,17 @@ export class QuerySanitizer {
       j = skipWith(shape, 0);
       if (j < 0) return false;
     }
-    for (const [bs, be] of branchesOf(shape, j, t.length)) {
+    const branches = branchesOf(shape, j, t.length);
+    if (branches.length > 1) {
+      let ordered = false;
+      for (let i = j; i < t.length && !ordered; i++) {
+        ordered = depth[i] === 0 && isWordAt(t, i, 'ORDER') && isWordAt(t, i + 1, 'BY');
+      }
+      const end = t[t.length - 1].end;
+      edits.push({ start: end, end, text: `${ordered ? '' : ' ORDER BY 1'} OFFSET 0 ROWS FETCH NEXT ${n} ROWS ONLY` });
+      return true;
+    }
+    for (const [bs, be] of branches) {
       let k = bs;
       while (k < be && isPunctAt(t, k, '(')) k++;
       if (!isWordAt(t, k, 'SELECT')) continue;

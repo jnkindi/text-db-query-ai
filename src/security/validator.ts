@@ -773,6 +773,10 @@ export class SecurityValidator {
           if (p) found.add(p);
           break;
         }
+        case 'NEXT':
+          // Advances a sequence, like the blocked NEXTVAL (T-SQL, standard SQL)
+          if (isWordAt(t, i + 1, 'VALUE') && isWordAt(t, i + 2, 'FOR')) found.add('NEXT VALUE FOR');
+          break;
         case 'LOCK':
           if (isWordAt(t, i + 1, 'IN') && isWordAt(t, i + 2, 'SHARE') && isWordAt(t, i + 3, 'MODE')) {
             found.add('LOCK IN SHARE MODE');

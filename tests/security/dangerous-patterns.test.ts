@@ -169,3 +169,18 @@ describe('cost', () => {
   });
 
 });
+
+describe('sequences', () => {
+  it('rejects NEXT VALUE FOR, which advances a sequence like the blocked NEXTVAL', async () => {
+    for (const databaseType of ['mssql', 'postgres', undefined] as const) {
+      const r = await new SecurityValidator({ requireUserContext: false }, { databaseType }).validate(
+        'SELECT NEXT VALUE FOR order_seq AS id'
+      );
+      expect(r.errors).toEqual(['Query contains dangerous patterns: NEXT VALUE FOR']);
+    }
+    const ok = await new SecurityValidator({ requireUserContext: false }, { databaseType: 'mssql' }).validate(
+      'SELECT id FROM t ORDER BY id OFFSET 5 ROWS FETCH NEXT 5 ROWS ONLY'
+    );
+    expect(ok.errors).toEqual([]);
+  });
+});

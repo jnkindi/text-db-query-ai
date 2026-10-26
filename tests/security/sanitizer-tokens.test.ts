@@ -157,7 +157,19 @@ describe('addLimitIfMissing', () => {
     expect(ms.addLimitIfMissing('SELECT id FROM t ORDER BY id OFFSET 10 ROWS', 100)).toBe(
       'SELECT id FROM t ORDER BY id OFFSET 10 ROWS FETCH NEXT 100 ROWS ONLY'
     );
-    expect(ms.addLimitIfMissing('SELECT a FROM t UNION SELECT b FROM u', 100)).toBe('SELECT TOP 100 a FROM t UNION SELECT TOP 100 b FROM u');
+    // TOP in each branch would allow 100 rows per branch: the whole result is limited instead
+    expect(ms.addLimitIfMissing('SELECT a FROM t UNION SELECT b FROM u', 100)).toBe(
+      'SELECT a FROM t UNION SELECT b FROM u ORDER BY 1 OFFSET 0 ROWS FETCH NEXT 100 ROWS ONLY'
+    );
+    expect(ms.addLimitIfMissing('SELECT a FROM t UNION ALL SELECT b FROM u ORDER BY a DESC', 100)).toBe(
+      'SELECT a FROM t UNION ALL SELECT b FROM u ORDER BY a DESC OFFSET 0 ROWS FETCH NEXT 100 ROWS ONLY'
+    );
+    expect(ms.enforceLimit('SELECT TOP 100 a FROM t UNION SELECT TOP 100 b FROM u', 100)).toBe(
+      'SELECT TOP 100 a FROM t UNION SELECT TOP 100 b FROM u ORDER BY 1 OFFSET 0 ROWS FETCH NEXT 100 ROWS ONLY'
+    );
+    expect(ms.addLimitIfMissing('WITH x AS (SELECT a FROM t) SELECT a FROM x UNION SELECT b FROM u', 5)).toBe(
+      'WITH x AS (SELECT a FROM t) SELECT a FROM x UNION SELECT b FROM u ORDER BY 1 OFFSET 0 ROWS FETCH NEXT 5 ROWS ONLY'
+    );
     expect(ms.addLimitIfMissing('UPDATE t SET a = 1', 100)).toBe('UPDATE t SET a = 1');
   });
 
