@@ -84,7 +84,7 @@
     "jest": "^30.5.0",
     "mysql2": "^3.24.0",
     "pg": "^8.23.0",
-    "sqlite3": "^5.1.7",
+    "sqlite3": "^6.0.1",
     "text-db-query-ai-legacy": "npm:text-db-query-ai@0.0.1",
     "ts-jest": "^29.4.15",
     "typescript": "~5.9.3"
