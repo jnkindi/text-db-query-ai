@@ -10,4 +10,4 @@ export {
   ChatbotHelper,
 } from './easy-setup';
 
-export type { EasySetupConfig } from './easy-setup';
+export type { EasySetupConfig, ChatbotHelperOptions } from './easy-setup';

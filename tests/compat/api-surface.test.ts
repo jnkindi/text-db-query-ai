@@ -48,6 +48,17 @@ const ALLOWED_PRIVATE_REMOVALS: ReadonlySet<string> = new Set<string>([
   'PrismaAdapter.getForeignKeys',
   'PrismaAdapter.getPrimaryKey',
   'PrismaAdapter.normalizeDataType',
+  // The generator pipeline (src/generator/query-generator.ts) now builds a
+  // cached system prompt and a separate user message in src/generator/prompt.ts
+  // (buildSystemPrompt/buildUserMessage) instead of one buildPrompt() string.
+  'QueryGenerator.buildPrompt',
+  // Operation, tables and complexity come from one analyzeSql() pass per
+  // attempt: analysis.operation and the module functions extractTables() and
+  // estimateComplexity() in query-generator.ts (token-based, same 0.0.1
+  // ordering and weights).
+  'QueryGenerator.detectOperation',
+  'QueryGenerator.extractTables',
+  'QueryGenerator.estimateComplexity',
 ]);
 
 const CLASS_SOURCE = /^class\b/;
