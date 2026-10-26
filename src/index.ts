@@ -13,9 +13,12 @@ import { SchemaAnalyzer as SA } from './schema';
 import { createLLMProvider as createProvider } from './providers';
 
 // Core exports
-export { QueryGenerator } from './generator';
+export { QueryGenerator, checkIdentifiers, IdentifierChecker } from './generator';
+export type { IdentifierIssue, IdentifierIssueKind } from './generator';
 export { SecurityValidator, QuerySanitizer } from './security';
+export type { SecurityValidatorOptions } from './security';
 export { SchemaAnalyzer } from './schema';
+export type { SchemaRenderOptions } from './schema';
 export { createLLMProvider, BaseLLMProvider, OpenAIProvider, ClaudeProvider } from './providers';
 
 // ORM Adapters
@@ -38,7 +41,7 @@ export {
   ChatbotHelper,
 } from './helpers';
 
-export type { EasySetupConfig } from './helpers';
+export type { EasySetupConfig, ChatbotHelperOptions } from './helpers';
 
 // SQL analysis (the lexer the validator and identifier checks are built on)
 export {
@@ -49,6 +52,8 @@ export {
   DEFAULT_BLOCKED_FUNCTIONS,
   isBlockedFunction,
   quoteIdentifier,
+  formatIdentifier,
+  needsQuoting,
   sqlReadings,
 } from './sql';
 

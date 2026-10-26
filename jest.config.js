@@ -14,12 +14,14 @@ module.exports = {
   ],
   coverageDirectory: 'coverage',
   coverageReporters: ['text', 'lcov', 'html'],
+  // Measured at about 96% statements and 90% branches; the margin covers runs
+  // where optional drivers (sqlite3, MySQL) are unavailable and their tests skip.
   coverageThreshold: {
     global: {
-      branches: 25,
-      functions: 35,
-      lines: 35,
-      statements: 35,
+      branches: 80,
+      functions: 90,
+      lines: 90,
+      statements: 90,
     },
   },
   moduleFileExtensions: ['ts', 'tsx', 'js', 'jsx', 'json', 'node'],
