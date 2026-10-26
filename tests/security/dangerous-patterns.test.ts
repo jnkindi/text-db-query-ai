@@ -184,3 +184,53 @@ describe('sequences', () => {
     expect(ok.errors).toEqual([]);
   });
 });
+
+describe('T-SQL queries stacked without ";"', () => {
+  // SQL Server runs each as its own statement; the driver returns the first result.
+  const stacked = [
+    'SELECT * FROM orders SELECT 1 AS x',
+    'SELECT * FROM orders SELECT * FROM orders',
+    'SELECT * FROM orders WHERE id = 1 SELECT * FROM orders',
+    "SELECT * FROM orders WHERE note = 'x' SELECT 1",
+    'SELECT * FROM orders WITH x AS (SELECT 1 AS a) SELECT * FROM x',
+    'SELECT * FROM orders WITH RECURSIVE x AS (SELECT 1 AS a) SELECT * FROM x',
+    'SELECT * FROM orders WHERE (id = 1) (SELECT 1)',
+    'UPDATE orders SET total = 1 WHERE id = 2 SELECT * FROM orders',
+  ];
+  const fine = [
+    'SELECT a FROM t UNION SELECT a FROM u',
+    'SELECT a FROM t UNION ALL SELECT a FROM u EXCEPT SELECT a FROM v',
+    'SELECT a FROM t INTERSECT SELECT a FROM u',
+    '(SELECT a FROM t) UNION (SELECT a FROM u)',
+    'WITH x AS (SELECT 1 AS a), y (b) AS (SELECT 2) SELECT * FROM x, y',
+    'INSERT INTO t SELECT a FROM u',
+    'INSERT INTO t (a, b) SELECT a, b FROM u',
+    'INSERT t SELECT a FROM u',
+    'SELECT id FROM orders WITH (NOLOCK) WHERE id IN (SELECT id FROM t)',
+    'SELECT TOP 5 WITH TIES id FROM orders ORDER BY total',
+    'SELECT id, (SELECT MAX(total) FROM orders) AS m FROM t WHERE EXISTS (SELECT 1 FROM u)',
+  ];
+
+  it.each(['mssql', undefined] as const)('rejects them (%s)', async (databaseType) => {
+    const v = new SecurityValidator(
+      { requireUserContext: false, allowedOperations: ['SELECT', 'UPDATE', 'INSERT'], allowUnion: true },
+      { databaseType }
+    );
+    for (const sql of stacked) {
+      expect({ sql, errors: (await v.validate(sql)).errors }).toEqual({
+        sql,
+        errors: expect.arrayContaining(['Query contains dangerous patterns: Multiple statements detected']),
+      });
+    }
+    for (const sql of fine) {
+      expect({ sql, errors: (await v.validate(sql)).errors }).toEqual({ sql, errors: [] });
+    }
+  });
+
+  it('keeps the row-level filter in the first statement', () => {
+    const v = new SecurityValidator({ enableRowLevelSecurity: true }, { databaseType: 'mssql' });
+    expect(v.addRowLevelSecurity('SELECT * FROM orders SELECT 1 AS x', { userId: 5, role: 'u' })).toBe(
+      'SELECT * FROM orders WHERE user_id = 5 SELECT 1 AS x'
+    );
+  });
+});

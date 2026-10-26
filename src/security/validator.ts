@@ -28,6 +28,7 @@ import {
   findRowLimits,
   isNameToken,
   isPunctAt,
+  isQueryGroup,
   isWordAt,
   mainIndex,
   nameOf,
@@ -726,6 +727,8 @@ export class SecurityValidator {
     const headWord = head >= 0 && t[head].type === 'word' ? t[head].value : '';
     // The first SET of UPDATE ... SET / MySQL INSERT ... SET belongs to the statement
     let setPending = headWord === 'UPDATE' || headWord === 'INSERT';
+    // The first top-level query of INSERT ... SELECT is its source, unless VALUES came first
+    let insertSource = headWord === 'INSERT';
 
     if (index > 0 && LEGACY_STATEMENT_PATTERNS.has(headWord)) found.add(headWord);
 
@@ -747,6 +750,17 @@ export class SecurityValidator {
           ) {
             found.add('--'); // a comment to Postgres, SQLite and SQL Server
           }
+        }
+        continue;
+      }
+      // T-SQL runs `... (SELECT ...)` after a complete expression as a statement of its own
+      if (stacking && tok.type === 'punct' && tok.value === '(' && s.depth[i] === 0 && i > head && isQueryGroup(s, i)) {
+        const prev = t[i - 1];
+        const afterExpression =
+          prev.type === 'number' || prev.type === 'string' || (prev.type === 'punct' && (prev.value === ')' || prev.value === ']'));
+        if (afterExpression) {
+          if (insertSource) insertSource = false;
+          else found.add(MULTIPLE_STATEMENTS);
         }
         continue;
       }
@@ -803,6 +817,16 @@ export class SecurityValidator {
           break;
       }
 
+      // A second top-level SELECT or WITH starts a new T-SQL statement (SQL Server needs no ";",
+      // and the driver returns the first statement's rows, which row-level security did not filter)
+      if (stacking && i > head && s.depth[i] === 0) {
+        if (v === 'VALUES') insertSource = false;
+        if ((v === 'SELECT' || v === 'WITH') && this.startsQueryStatement(s, i)) {
+          if (insertSource && v === 'SELECT') insertSource = false;
+          else found.add(MULTIPLE_STATEMENTS);
+        }
+      }
+
       if (stacking && i !== head && TSQL_STATEMENTS.has(v)) {
         if (v === 'SET' && setPending && s.depth[i] === 0) {
           setPending = false;
@@ -819,6 +843,32 @@ export class SecurityValidator {
    * follows the end of an operand (a name, literal, `)` or `*`) and is followed
    * by something a statement can start with.
    */
+  /**
+   * Whether the top-level SELECT or WITH at `i` begins a new statement rather
+   * than continuing this one: it does not follow a set operator, `(`, `,`, an
+   * operator or another word that needs a query after it, and a WITH opens a
+   * CTE (`WITH [RECURSIVE] x [(cols)] AS (`), not a table hint, WITH TIES,
+   * WITH ORDINALITY or WITH TIME ZONE.
+   */
+  private startsQueryStatement(s: Shape, i: number): boolean {
+    const t = s.t;
+    const prev = t[i - 1];
+    if (!prev || prev.type === 'operator') return false;
+    if (prev.type === 'punct' && prev.value !== ')' && prev.value !== ']') return false;
+    if (prev.type === 'word' && NO_STATEMENT_AFTER.has(prev.value) && isWordAt(t, i - 1, prev.value)) return false;
+    if (t[i].value === 'SELECT') return true;
+    let k = i + 1;
+    if (isWordAt(t, k, 'RECURSIVE')) k++;
+    if (!isNameToken(t[k])) return false;
+    k++;
+    if (isPunctAt(t, k, '(')) {
+      const close = s.pair[k];
+      if (close <= k) return false;
+      k = close + 1;
+    }
+    return isWordAt(t, k, 'AS') && isPunctAt(t, k + 1, '(');
+  }
+
   private startsStatement(t: Token[], i: number): boolean {
     const v = t[i].value;
     const prev = t[i - 1];
@@ -1254,6 +1304,11 @@ export class SecurityValidator {
       if (where < 0 && isWordAt(t, i, 'WHERE')) {
         where = i;
         continue;
+      }
+      // A second SELECT on this level is a T-SQL statement of its own: keep the filter in this one
+      if (isWordAt(t, i, 'SELECT')) {
+        boundary = i;
+        break;
       }
       if (isClauseBoundary(t, i, head)) {
         boundary = i;
