@@ -54,18 +54,21 @@ export type SqlLexErrorKind =
   | 'unterminated_string'
   | 'unterminated_quoted_identifier'
   | 'unterminated_comment'
-  | 'executable_comment';
+  | 'executable_comment'
+  | 'ambiguous_syntax';
 
 /**
  * Thrown by `tokenize()` when a string, quoted identifier or block comment is
  * never closed, or (mysql and generic) on a MySQL executable comment
- * (`/*! ... *\/`, `/*M! ... *\/`), whose body the server runs as code.
+ * (`/*! ... *\/`, `/*M! ... *\/`), whose body the server runs as code. In the
+ * generic dialect it also refuses `--` followed by a non-space, which MySQL
+ * runs as two minus signs and every other database skips as a comment.
  */
 export class SqlLexError extends Error {
   readonly kind: SqlLexErrorKind;
   /** Offset of the start of the unterminated token (including any prefix such as `E` or `N`). */
   readonly position: number;
-  /** The opening delimiter: `'`, `"`, a backtick, `[`, `/*`, `/*!`, `/*M!` or a dollar-quote tag such as `$fn$`. */
+  /** The opening delimiter: `'`, `"`, a backtick, `[`, `/*`, `/*!`, `/*M!`, `--` or a dollar-quote tag such as `$fn$`. */
   readonly delimiter: string;
 
   constructor(kind: SqlLexErrorKind, position: number, delimiter: string) {
@@ -78,7 +81,10 @@ export class SqlLexError extends Error {
     super(
       kind === 'executable_comment'
         ? `MySQL executable comment starting at position ${position} is not allowed`
-        : `Unterminated ${what} starting at position ${position}`,
+        : kind === 'ambiguous_syntax'
+          ? `Ambiguous "${delimiter}" at position ${position}: databases read it differently. ` +
+            'Add a space after it, or set the database type'
+          : `Unterminated ${what} starting at position ${position}`,
     );
     this.name = 'SqlLexError';
     this.kind = kind;
@@ -214,8 +220,8 @@ export function tokenize(sql: string, dialect: SqlDialect = 'generic', options: 
   // MySQL server would ignore is analyzed as code.
   const hashComment = isMysql || dialect === 'generic';
   // MySQL needs whitespace or a control character after `--` (`1--1` is
-  // 1 - -1), and runs the body of `/*! ... */` as code. Generic follows MySQL
-  // here too, so it never skips text a MySQL server would run.
+  // 1 - -1), and runs the body of `/*! ... */` as code. Generic refuses both,
+  // since no single reading of them is right for every database.
   const mysqlComments = isMysql || dialect === 'generic';
   const nestedComments = isPg || isMssql;
   const backtickIdent = isMysql || isSqlite || dialect === 'generic';
@@ -355,10 +361,9 @@ export function tokenize(sql: string, dialect: SqlDialect = 'generic', options: 
 
     // Line comments: `--` everywhere (MySQL: only before whitespace, a control
     // character or the end), `#` in MySQL (and generic)
-    if (
-      (c === C_MINUS && c1 === C_MINUS && !(mysqlComments && i + 2 < n && sql.charCodeAt(i + 2) > C_SPACE)) ||
-      (c === C_HASH && hashComment)
-    ) {
+    const dashCode = c === C_MINUS && c1 === C_MINUS && mysqlComments && i + 2 < n && sql.charCodeAt(i + 2) > C_SPACE;
+    if (dashCode && !isMysql) throw new SqlLexError('ambiguous_syntax', start, '--');
+    if ((c === C_MINUS && c1 === C_MINUS && !dashCode) || (c === C_HASH && hashComment)) {
       i += c === C_HASH ? 1 : 2;
       while (i < n) {
         const d = sql.charCodeAt(i);

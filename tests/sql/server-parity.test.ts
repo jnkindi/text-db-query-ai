@@ -51,7 +51,7 @@ describe('MySQL executable comments', () => {
 });
 
 describe('MySQL double-dash comments', () => {
-  it.each(['mysql', 'generic'] as const)('reads --x as two minus signs in %s, as the server does', (dialect) => {
+  it.each(['mysql'] as const)('reads --x as two minus signs in %s, as the server does', (dialect) => {
     const sql = 'SELECT 1 --(SELECT password FROM users)';
     expect(tableNames(sql, dialect)).toEqual(['users']);
     expect(analyzeSql(sql, dialect).hasComments).toBe(false);
@@ -118,5 +118,20 @@ describe('CTE names versus table names', () => {
 
   it('compares names case-insensitively in sqlite, as sqlite does', () => {
     expect(tableNames('WITH Secrets AS (SELECT 1 AS x) SELECT * FROM secrets', 'sqlite')).toEqual([]);
+  });
+});
+
+describe('generic dialect: constructs that databases read differently', () => {
+  it('refuses -- followed by a non-space, which MySQL runs as code and others skip', () => {
+    expect(lexErrorKind(() => tokenize("SELECT 1 --'\n; DROP TABLE users; --'", 'generic'))).toBe('ambiguous_syntax');
+    expect(lexErrorKind(() => tokenize('SELECT a FROM t --x', 'generic'))).toBe('ambiguous_syntax');
+    expect(analyzeSql('SELECT a FROM t -- note', 'generic').hasComments).toBe(true);
+  });
+
+  it('matches CTE names only when the exact and the Postgres-folded names both agree', () => {
+    // Postgres folds the unquoted reference to "secrets", which is not the CTE "Secrets".
+    expect(tableNames('WITH "Secrets" AS (SELECT 1 AS x) SELECT * FROM Secrets', 'generic')).toEqual(['Secrets']);
+    expect(tableNames('WITH recent AS (SELECT 1 AS x) SELECT * FROM recent', 'generic')).toEqual([]);
+    expect(tableNames('WITH Recent AS (SELECT 1 AS x) SELECT * FROM Recent', 'generic')).toEqual([]);
   });
 });

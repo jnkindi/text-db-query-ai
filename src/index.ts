@@ -49,6 +49,7 @@ export {
   DEFAULT_BLOCKED_FUNCTIONS,
   isBlockedFunction,
   quoteIdentifier,
+  sqlReadings,
 } from './sql';
 
 export type {
@@ -61,6 +62,7 @@ export type {
   TableReference,
   ColumnReference,
   NestedStatement,
+  SqlReading,
 } from './sql';
 
 // Types

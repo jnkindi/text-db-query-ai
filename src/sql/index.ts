@@ -18,3 +18,6 @@ export {
 } from './keywords';
 
 export { needsQuoting, quoteIdentifier } from './identifiers';
+
+export type { SqlReading } from './readings';
+export { sqlReadings } from './readings';

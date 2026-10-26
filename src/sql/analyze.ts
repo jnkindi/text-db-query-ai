@@ -482,12 +482,15 @@ class StatementAnalyzer {
    * Name used to match table references with CTE names. Postgres folds
    * unquoted names to lower case and SQLite compares names case-insensitively.
    * MySQL and SQL Server may compare them case-sensitively (lower_case_table_names,
-   * a _CS collation) and generic may be either, so there a reference that only
-   * matches a CTE after folding stays a table.
+   * a _CS collation), so there a reference that only matches a CTE after
+   * folding stays a table. Generic needs the exact and the Postgres-folded
+   * names to match together.
    */
   private foldName(tok: Token): string {
-    if (this.dialect === 'postgres') return tok.type === 'quoted' ? tok.value : tok.text.toLowerCase();
+    const pgFold = tok.type === 'quoted' ? tok.value : tok.text.toLowerCase();
+    if (this.dialect === 'postgres') return pgFold;
     if (this.dialect === 'sqlite') return nameOf(tok).toLowerCase();
+    if (this.dialect === 'generic') return `${nameOf(tok)}\u0000${pgFold}`;
     return nameOf(tok);
   }
 
