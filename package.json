@@ -87,7 +87,7 @@
     "sqlite3": "^5.1.7",
     "text-db-query-ai-legacy": "npm:text-db-query-ai@0.0.1",
     "ts-jest": "^29.4.15",
-    "typescript": "~5.9.3"
+    "typescript": "~7.0.2"
   },
   "engines": {
     "node": ">=18.0.0"
