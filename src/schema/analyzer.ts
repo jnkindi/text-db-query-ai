@@ -1,5 +1,6 @@
-import { DatabaseSchema, TableSchema, ColumnSchema, DatabaseType } from '../types';
+import { DatabaseSchema, TableSchema, ColumnSchema, DatabaseType, QueryOperation, SecurityConfig } from '../types';
 import { formatIdentifier, SqlDialect, toSqlDialect } from '../sql';
+import { RestrictedColumns } from '../security/columns';
 
 /**
  * Options for SchemaAnalyzer.renderForModel().
@@ -9,8 +10,28 @@ export interface SchemaRenderOptions {
   dialect?: SqlDialect;
   /** Include table and column descriptions. Default: true. */
   descriptions?: boolean;
-  /** Include `sampleValues` (never for sensitive columns). Default: true. */
+  /** Include `sampleValues` (never for sensitive or restricted columns). Default: true. */
   sampleValues?: boolean;
+  /**
+   * Render the schema for these security settings, matched the way the
+   * validator matches them. With `allowedTables`, only the tables it allows
+   * are shown (case-insensitive; an unqualified entry names a table without a
+   * schema or in the dialect's default schema, `schema.table` names that
+   * table), and foreign keys to other tables are left out. Columns that
+   * `restrictedColumns` covers are marked RESTRICTED. Default: every table,
+   * no RESTRICTED markers.
+   */
+  security?: Pick<SecurityConfig, 'allowedTables' | 'restrictedColumns' | 'restrictedColumnsMatch'>;
+}
+
+/**
+ * A table as the model sees it.
+ * @internal
+ */
+export interface ModelTable {
+  table: TableSchema;
+  /** The name as renderForModel() writes it: quoted where needed, schema-qualified where needed. */
+  name: string;
 }
 
 /** Schema that unqualified names resolve to, per dialect; tables elsewhere are shown qualified. */
@@ -24,11 +45,19 @@ const WHITESPACE = /\s+/g;
 const CLOSING_TAG = /<\/(?=[A-Za-z_])/g;
 const SINGLE_QUOTE = /'/g;
 
+/** Postgres features line; RETURNING is added only when the model may write (see getDialectRules). */
+const POSTGRES_FEATURES = '- CTEs (WITH) and JSON operators (->, ->>) are available.';
+const POSTGRES_FEATURES_WITH_WRITES = '- CTEs (WITH), RETURNING and JSON operators (->, ->>) are available.';
+/** Postgres, SQLite and SQL Server truncate integer division; MySQL's / does not. */
+const INTEGER_DIVISION = '- Dividing two integers truncates (7 / 2 = 3); multiply by 1.0 to keep the fraction.';
+const WRITE_OPERATIONS: ReadonlySet<string> = new Set(['INSERT', 'UPDATE', 'DELETE']);
+
 /**
  * Per-dialect rules for the model: quoting, row limits, date functions,
- * string concatenation, case-insensitive matching and booleans.
+ * string concatenation, case-insensitive matching, booleans and the most
+ * common runtime errors.
  */
-const DIALECT_RULES: Record<SqlDialect, string> = {
+const DIALECT_RULES: Record<SqlDialect, string[]> = {
   postgres: [
     'PostgreSQL rules:',
     '- Unquoted names are folded to lower case, so write a name in double quotes whenever the schema shows it quoted, also after an alias: t."createdAt".',
@@ -36,8 +65,11 @@ const DIALECT_RULES: Record<SqlDialect, string> = {
     "- Dates: NOW(), CURRENT_DATE, date_trunc('month', col), col >= NOW() - INTERVAL '7 days', EXTRACT(YEAR FROM col).",
     "- Concatenate strings with ||. Match case-insensitively with ILIKE ('%x%').",
     '- Booleans are TRUE and FALSE. String literals use single quotes.',
-    '- CTEs (WITH), RETURNING and JSON operators (->, ->>) are available.',
-  ].join('\n'),
+    INTEGER_DIVISION,
+    '- ROUND(x, n) needs a numeric x: ROUND(x::numeric, 2).',
+    '- A select-list alias cannot be used in WHERE or HAVING; repeat the expression.',
+    POSTGRES_FEATURES,
+  ],
   mysql: [
     'MySQL rules:',
     '- Quote names with backticks when the schema shows them quoted (`order`). Double quotes are string literals, not identifiers.',
@@ -45,15 +77,18 @@ const DIALECT_RULES: Record<SqlDialect, string> = {
     "- Dates: NOW(), CURDATE(), DATE_SUB(NOW(), INTERVAL 7 DAY), DATE_FORMAT(col, '%Y-%m'), YEAR(col).",
     '- Concatenate strings with CONCAT(a, b); || is not concatenation. LIKE is case-insensitive with the default collations.',
     '- Booleans are TRUE and FALSE (stored as 1 and 0). There is no FULL OUTER JOIN.',
-  ].join('\n'),
+    '- A select-list alias cannot be used in WHERE; repeat the expression.',
+  ],
   sqlite: [
     'SQLite rules:',
     '- Quote names with double quotes when the schema shows them quoted ("order").',
     '- Limit rows with LIMIT n, page with LIMIT n OFFSET m.',
     "- Dates are stored as text or numbers: date('now', '-7 days'), datetime('now'), strftime('%Y-%m', col), julianday(col).",
-    "- Concatenate strings with ||. LIKE is case-insensitive for ASCII letters; use LOWER(col) for other text.",
+    // The built-in lower() and upper() are ASCII-only too (without the ICU extension).
+    '- Concatenate strings with ||. LIKE and LOWER()/UPPER() fold case for ASCII letters only; for other letters compare the exact value or both spellings.',
     '- Booleans are stored as 1 and 0. String literals use single quotes; never use double quotes for strings.',
-  ].join('\n'),
+    INTEGER_DIVISION,
+  ],
   mssql: [
     'SQL Server (T-SQL) rules:',
     '- Quote names with square brackets when the schema shows them quoted ([Order], [User]).',
@@ -61,13 +96,16 @@ const DIALECT_RULES: Record<SqlDialect, string> = {
     "- Dates: GETDATE(), CAST(GETDATE() AS date), DATEADD(day, -7, GETDATE()), DATEDIFF(day, a, b), YEAR(col), FORMAT(col, 'yyyy-MM').",
     "- Concatenate strings with + or CONCAT(a, b). Use N'...' for Unicode strings. Matching is usually case-insensitive (collation); use LOWER() to be sure.",
     '- There are no boolean literals: bit columns use 1 and 0.',
-  ].join('\n'),
+    INTEGER_DIVISION,
+    '- ORDER BY is not allowed in a subquery or CTE without TOP or OFFSET.',
+    '- A select-list alias can be used only in ORDER BY; GROUP BY must repeat the expression.',
+  ],
   generic: [
     'SQL rules:',
     '- Use standard SQL. Quote names with double quotes when the schema shows them quoted.',
     '- Limit rows with LIMIT n. Dates: CURRENT_DATE, CURRENT_TIMESTAMP. Concatenate strings with ||.',
     '- Match case-insensitively with LOWER(col) LIKE LOWER(...). Booleans are TRUE and FALSE.',
-  ].join('\n'),
+  ],
 };
 
 /**
@@ -153,15 +191,16 @@ export class SchemaAnalyzer {
     const dialect = options.dialect ?? toSqlDialect(this.schema.databaseType);
     const withDescriptions = options.descriptions !== false;
     const withSamples = options.sampleValues !== false;
-    const tables = this.schema.tables || [];
+    const allowed = allowedTableFilter(options.security?.allowedTables, dialect);
+    const tables = this.modelTables(options);
     if (tables.length === 0) return '(no tables)';
 
-    const qualify = this.qualifyTables(dialect);
+    const qualify = qualifyTables(tables.map((t) => t.table), dialect);
+    const restricted = new RestrictedColumns(options.security ?? {});
     const name = (n: string) => renderName(n, dialect, this.schema.exactNames === true);
     const blocks: string[] = [];
 
-    for (const table of tables) {
-      const tableName = (qualify(table.schema) ? `${name(table.schema!)}.` : '') + name(table.name);
+    for (const { table, name: tableName } of tables) {
       let block = `TABLE ${tableName}`;
       if (withDescriptions && table.description) block += ` -- ${inlineText(table.description)}`;
 
@@ -169,13 +208,17 @@ export class SchemaAnalyzer {
       const fks = new Map<string, string>();
       for (const fk of table.foreignKeys || []) {
         if (fks.has(fk.column)) continue;
-        const refSchema = fk.referencedSchema !== undefined ? fk.referencedSchema : undefined;
-        const refTable = (refSchema && qualify(refSchema) ? `${name(refSchema)}.` : '') + name(fk.referencedTable);
+        // referencedSchema is set only when it differs from the table's own (ForeignKeySchema).
+        const refSchema = fk.referencedSchema ?? table.schema;
+        // A key to a table the model may not query only invites a query the validator rejects.
+        if (allowed && !allowed(fk.referencedTable, refSchema)) continue;
+        const refTable = (qualify(refSchema) ? `${name(refSchema!)}.` : '') + name(fk.referencedTable);
         fks.set(fk.column, fk.referencedColumn ? `${refTable}.${name(fk.referencedColumn)}` : refTable);
       }
 
       for (const column of table.columns || []) {
-        block += `\n  ${this.renderColumn(column, dialect, pk.has(column.name), fks.get(column.name), withDescriptions, withSamples)}`;
+        const isRestricted = !restricted.isEmpty && restricted.match(column.name, table.name, table.schema) !== undefined;
+        block += `\n  ${this.renderColumn(column, dialect, pk.has(column.name), fks.get(column.name), isRestricted, withDescriptions, withSamples)}`;
       }
       blocks.push(block);
     }
@@ -183,11 +226,34 @@ export class SchemaAnalyzer {
     return blocks.join('\n\n');
   }
 
+  /**
+   * The tables renderForModel() shows for these options (all of them, or only
+   * the ones `security.allowedTables` allows), in schema order, with their
+   * names written as renderForModel() writes them.
+   * @internal
+   */
+  modelTables(options: SchemaRenderOptions = {}): ModelTable[] {
+    const dialect = options.dialect ?? toSqlDialect(this.schema.databaseType);
+    const allowed = allowedTableFilter(options.security?.allowedTables, dialect);
+    const tables = (this.schema.tables || []).filter(
+      (t) => !!t && typeof t.name === 'string' && (!allowed || allowed(t.name, t.schema))
+    );
+    // Qualify only as far as the shown tables need it: with every allowed table in
+    // the default schema, `orders` is what the model should write.
+    const qualify = qualifyTables(tables, dialect);
+    const name = (n: string) => renderName(n, dialect, this.schema.exactNames === true);
+    return tables.map((table) => ({
+      table,
+      name: (qualify(table.schema) ? `${name(table.schema!)}.` : '') + name(table.name),
+    }));
+  }
+
   private renderColumn(
     column: ColumnSchema,
     dialect: SqlDialect,
     isPrimaryKey: boolean,
     reference: string | undefined,
+    isRestricted: boolean,
     withDescriptions: boolean,
     withSamples: boolean
   ): string {
@@ -199,35 +265,30 @@ export class SchemaAnalyzer {
       const more = column.enumValues.length - MAX_ENUM_VALUES;
       line += ` values: ${shown}${more > 0 ? `, ... (${more} more)` : ''}`;
     }
+    if (isRestricted) line += ' RESTRICTED';
     if (column.sensitive) {
       line += ' SENSITIVE';
-    } else if (withSamples && column.sampleValues && column.sampleValues.length > 0) {
+    } else if (!isRestricted && withSamples && column.sampleValues && column.sampleValues.length > 0) {
+      // Never sample values of a column the application keeps from the model.
       line += ` e.g. ${column.sampleValues.slice(0, MAX_SAMPLE_VALUES).map(sqlLiteral).join(', ')}`;
     }
     if (withDescriptions && column.description) line += ` -- ${inlineText(column.description)}`;
     return line;
   }
 
-  /** Whether tables in `schema` must be shown schema-qualified. */
-  private qualifyTables(dialect: SqlDialect): (schema: string | undefined) => boolean {
-    const schemas = new Set<string>();
-    for (const table of this.schema.tables || []) if (table.schema) schemas.add(table.schema);
-    const several = schemas.size > 1;
-    const fallback = DEFAULT_SCHEMAS[dialect];
-    return (schema) => {
-      if (!schema) return false;
-      if (several) return true;
-      return fallback !== undefined && schema.toLowerCase() !== fallback;
-    };
-  }
-
   /**
    * Rules for writing SQL in this schema's dialect: quoting, LIMIT or TOP,
-   * date functions, string concatenation, case-insensitive matching and
-   * booleans.
+   * date functions, string concatenation, case-insensitive matching,
+   * booleans and common runtime errors.
+   *
+   * @param options - `allowedOperations`: the statements the model may write
+   *   (default: SELECT only); write-only features such as RETURNING are
+   *   mentioned only when INSERT, UPDATE or DELETE is allowed
    */
-  getDialectRules(): string {
-    return DIALECT_RULES[toSqlDialect(this.schema.databaseType)];
+  getDialectRules(options: { allowedOperations?: QueryOperation[] } = {}): string {
+    const writes = (options.allowedOperations || []).some((op) => WRITE_OPERATIONS.has(String(op).toUpperCase()));
+    const lines = DIALECT_RULES[toSqlDialect(this.schema.databaseType)];
+    return lines.map((line) => (writes && line === POSTGRES_FEATURES ? POSTGRES_FEATURES_WITH_WRITES : line)).join('\n');
   }
 
   /**
@@ -356,6 +417,53 @@ export class SchemaAnalyzer {
 /** A name as it must be written in `dialect`: quoted only when needed (see DatabaseSchema.exactNames). */
 function renderName(name: string, dialect: SqlDialect, exactCase: boolean): string {
   return formatIdentifier(name, dialect, exactCase);
+}
+
+/** Whether tables in a schema must be shown schema-qualified, given the tables shown. */
+function qualifyTables(tables: TableSchema[], dialect: SqlDialect): (schema: string | undefined) => boolean {
+  const schemas = new Set<string>();
+  for (const table of tables) if (table.schema) schemas.add(table.schema);
+  const several = schemas.size > 1;
+  const fallback = DEFAULT_SCHEMAS[dialect];
+  return (schema) => {
+    if (!schema) return false;
+    if (several) return true;
+    return fallback !== undefined && schema.toLowerCase() !== fallback;
+  };
+}
+
+/**
+ * A predicate for the tables `allowedTables` allows, or undefined when every
+ * table is allowed (no entries). Matching is case-insensitive. An unqualified
+ * entry names a table without a schema or in the dialect's default schema
+ * (any schema on MySQL and generic SQL, where the default is whatever the
+ * connection uses); `schema.table` names that table, and a schema-less table
+ * when `schema` is the default.
+ */
+function allowedTableFilter(
+  entries: string[] | undefined,
+  dialect: SqlDialect
+): ((name: string, schema: string | undefined) => boolean) | undefined {
+  if (!Array.isArray(entries) || entries.length === 0) return undefined;
+  const fallback = DEFAULT_SCHEMAS[dialect];
+  const parsed: Array<{ table: string; schema?: string }> = [];
+  for (const entry of entries) {
+    const parts = String(entry).trim().toLowerCase().split('.');
+    const table = parts[parts.length - 1];
+    if (!table) continue;
+    // `db..table` has an empty schema part: it reads like an unqualified entry.
+    const schema = parts.length > 1 && parts[parts.length - 2] ? parts[parts.length - 2] : undefined;
+    parsed.push({ table, schema });
+  }
+  return (name, schema) => {
+    const table = name.toLowerCase();
+    const own = schema ? schema.toLowerCase() : undefined;
+    return parsed.some((e) => {
+      if (e.table !== table) return false;
+      if (e.schema === undefined) return own === undefined || fallback === undefined || own === fallback;
+      return own === undefined ? e.schema === fallback : own === e.schema;
+    });
+  };
 }
 
 /** Primary key columns: primaryKeyColumns, or the 0.0.1 primaryKey string ("a, b" for composite keys). */
