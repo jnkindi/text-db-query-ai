@@ -245,6 +245,11 @@ describe('maxRowLimit', () => {
       ['SELECT * FROM t FETCH FIRST 50 PERCENT ROWS ONLY', 'FETCH'],
       ['SELECT TOP 100 PERCENT * FROM t', 'TOP', 'mssql'],
       ['SELECT TOP (2 * 1000) * FROM t', 'TOP', 'mssql'],
+      // Variables are not placeholders the application binds: @@TEXTSIZE is 2147483647
+      ['SELECT TOP (@@TEXTSIZE) * FROM t', 'TOP', 'mssql'],
+      ['SELECT TOP (@n) * FROM t', 'TOP', 'mssql'],
+      ['SELECT * FROM t LIMIT @@max_join_size', 'LIMIT', 'mysql'],
+      ['SELECT * FROM t FETCH FIRST ? PERCENT ROWS ONLY', 'FETCH', 'postgres'],
     ];
     for (const [sql, keyword, databaseType] of cases) {
       const r = await check(sql, cfg, { databaseType: databaseType as any });
@@ -252,13 +257,13 @@ describe('maxRowLimit', () => {
     }
   });
 
-  it('only warns for a lone parameter, which the application binds (as in 0.0.1)', async () => {
+  it('only warns for a lone placeholder, which the application binds (as in 0.0.1)', async () => {
     const cfg: SecurityConfig = { maxRowLimit: 100 };
     for (const [sql, databaseType] of [
       ['SELECT * FROM t LIMIT ?', 'mysql'],
       ['SELECT * FROM t LIMIT $1', 'postgres'],
       ['SELECT * FROM t LIMIT ?, ?', 'mysql'],
-      ['SELECT TOP (@n) * FROM t', 'mssql'],
+      ['SELECT * FROM t LIMIT :n', 'sqlite'],
     ] as const) {
       const r = await check(sql, cfg, { databaseType });
       expect(r.errors).toEqual([]);

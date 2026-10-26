@@ -192,10 +192,21 @@ const eqi = (a: string | undefined, b: string | undefined): boolean =>
   a !== undefined && b !== undefined && a.toUpperCase() === b.toUpperCase();
 
 /** End offsets of the strings, quoted identifiers and comments of a token list. */
-/** `?`, `$1` or `(@n)` alone as a row count. */
+/**
+ * A client placeholder (`?`, `?1`, `$1`, `:name`, optionally in parentheses)
+ * alone as a row count, not followed by PERCENT. `@name` and `@@name` are
+ * server variables (`@@TEXTSIZE` is 2147483647), not values the application binds.
+ */
 function isLoneParam(t: Token[], i: number): boolean {
-  if (isPunctAt(t, i, '(')) return t[i + 1]?.type === 'param' && isPunctAt(t, i + 2, ')');
-  return t[i]?.type === 'param' && t[i + 1]?.type !== 'operator';
+  let k = i;
+  if (isPunctAt(t, k, '(')) {
+    if (!isPunctAt(t, k + 2, ')')) return false;
+    k++;
+  }
+  const tok = t[k];
+  if (!tok || tok.type !== 'param' || tok.text.startsWith('@')) return false;
+  const next = t[isPunctAt(t, i, '(') ? k + 2 : k + 1];
+  return !(next && (next.type === 'operator' || (next.type === 'word' && next.value === 'PERCENT')));
 }
 
 function literalEnds(tokens: Token[]): number[] {
@@ -1249,8 +1260,10 @@ export class SecurityValidator {
     const chosen = this.rlsTarget(st, bs, be, d, head === 'SELECT' && from >= 0 ? from : -1, where >= 0 ? where : boundary);
     if (chosen) for (const l of chosen.covered) st.handled.add(l.index);
     const qualifier = chosen && chosen.qualify ? `${this.tableText(st, chosen.table)}.` : '';
-    // An existing `t.col = v` only covers its own table, not an unqualified filter's whole level
-    const sameAs = chosen && (chosen.qualify || chosen.covered.length === 1) ? chosen.table : undefined;
+    // An existing qualified `t.col = v` only stands in for the filter on a single-table
+    // level without joins; anywhere else only an unqualified `col = v` (the same predicate
+    // the filter would add) does.
+    const sameAs = chosen && !chosen.qualify && chosen.direct.length === 1 ? chosen.table : undefined;
     const filter = `${qualifier}${st.column.text} = ${st.value}`;
 
     if (where < 0) {
@@ -1313,12 +1326,6 @@ export class SecurityValidator {
     // malformed condition (dangling BETWEEN, unclosed CASE) stays malformed.
     const pure = !orLike && !broken && caseDepth === 0 && betweens === 0;
 
-    if (pure && chosen && chosen.qualify) {
-      // `x.col = v` in a pure AND-chain already filters table x of this branch
-      for (const l of chosen.direct) {
-        if (l !== chosen.table && conjuncts.some(([a, b]) => this.isSameFilter(st, a, b, l))) st.handled.add(l.index);
-      }
-    }
     if (pure && conjuncts.some(([a, b]) => this.isSameFilter(st, a, b, sameAs))) return;
 
     const end = t[condEnd - 1].end;
@@ -1470,8 +1477,8 @@ export class SecurityValidator {
     let k = a;
     if (b - a === 5) {
       if (!isPunctAt(t, a + 1, '.') || !isNameToken(t[a]) || !target) return false;
-      const q = nameOf(t[a]);
-      if (!eqi(q, target.ref.alias) && !eqi(q, target.ref.name)) return false;
+      // A table with an alias is known by its alias only
+      if (!eqi(nameOf(t[a]), target.ref.alias ?? target.ref.name)) return false;
       k = a + 2;
     } else if (b - a !== 3) {
       return false;

@@ -92,6 +92,9 @@ const LEAKS = [
   ['comma join of two user tables', 'SELECT n.id, n.body FROM orders o, notes n'],
   ['join without aliases', 'SELECT notes.id, notes.body FROM orders JOIN notes ON notes.order_id = orders.id OR 1 = 1'],
   ['subquery in a UNION branch', 'SELECT id FROM orders UNION SELECT id FROM notes WHERE id IN (SELECT id FROM notes)'],
+  // `orders` here is the alias of notes: it does not filter the table aliased o
+  ['a filter on an alias that is another table\'s name', 'SELECT o.id AS oid, orders.id AS nid FROM orders o JOIN notes orders ON 1 = 1 WHERE orders.user_id = 1'],
+  ['a filter on one joined table', 'SELECT o.id AS oid, x.id AS xid FROM orders o JOIN orders x ON 1 = 1 WHERE x.user_id = 1'],
 ] as const;
 
 /** Queries whose meaning must survive the rewrite unchanged for user 1. */
@@ -195,6 +198,15 @@ describeSqlite('row-level security covers every read (SQLite)', () => {
       expect(validator.addRowLevelSecurity(sql, USER)).toBe(`${sql} WHERE user_id = 1`);
       await expect(run(full, validator.addRowLevelSecurity('SELECT o.id FROM orders o JOIN notes n ON 1 = 1', USER))).rejects.toThrow(
         /ambiguous/,
+      );
+    });
+
+    it('does not count a filter on a table whose columns are renamed as covering the join (Postgres syntax)', () => {
+      const pg = new SecurityValidator(CONFIG, { databaseType: 'postgres' });
+      const out = pg.addRowLevelSecurity('SELECT * FROM orders AS o(a, b, c, d) JOIN notes n ON true WHERE o.user_id = 1', USER);
+      // n gets the unqualified filter (o renames user_id away), and o is wrapped
+      expect(out).toBe(
+        'SELECT * FROM (SELECT * FROM orders AS __rls WHERE __rls.user_id = 1) AS o(a, b, c, d) JOIN notes n ON true WHERE o.user_id = 1 AND user_id = 1',
       );
     });
 

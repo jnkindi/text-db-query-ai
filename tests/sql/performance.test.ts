@@ -6,6 +6,9 @@
 import { analyzeSql } from '../../src/sql/analyze';
 import { tokenize } from '../../src/sql/lexer';
 
+// Wall-clock bounds share the CPU with the other jest workers: retry a load spike twice.
+jest.retryTimes(2, { logErrorsBeforeRetry: true });
+
 // Coverage instrumentation slows the code down several times; keep the bounds meaningful without it.
 const instrumented = typeof (globalThis as Record<string, unknown>).__coverage__ !== 'undefined';
 const SCALE = instrumented ? 10 : 1;

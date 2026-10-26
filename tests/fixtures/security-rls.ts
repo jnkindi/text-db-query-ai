@@ -287,7 +287,9 @@ export const rlsCases: RlsCase[] = [
     name: 'filter on a different qualifier',
     schema: rlsSchema,
     query: 'SELECT * FROM orders o JOIN orders x ON x.id = o.id WHERE x.user_id = 123',
-    expected: 'SELECT * FROM orders o JOIN orders x ON x.id = o.id WHERE x.user_id = 123 AND o.user_id = 123',
+    // x is wrapped even though the WHERE filters it: only filters the rewriter adds count
+    expected:
+      'SELECT * FROM orders o JOIN (SELECT id, user_id, total, status FROM orders AS __rls WHERE __rls.user_id = 123) x ON x.id = o.id WHERE x.user_id = 123 AND o.user_id = 123',
   },
   {
     name: 'user_id mentioned in a string',
