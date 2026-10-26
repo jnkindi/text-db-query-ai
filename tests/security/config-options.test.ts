@@ -179,6 +179,9 @@ describe('restrictedColumns', () => {
       'SELECT id FROM orders WHERE user_id IN (SELECT * FROM users) LIMIT 1',
       'SELECT o.id FROM orders o WHERE EXISTS (SELECT * FROM users u WHERE u.password = 1) LIMIT 1',
       'SELECT array_agg(u.*) FROM users u LIMIT 1',
+      // Only the SELECT right after EXISTS ( is exempt; a set-operation branch inside still counts
+      'SELECT o.id FROM orders o WHERE EXISTS (SELECT * FROM orders UNION SELECT * FROM users) LIMIT 1',
+      'SELECT o.id FROM orders o WHERE EXISTS (SELECT * FROM orders) AND o.id IN (SELECT * FROM users) LIMIT 1',
     ]) {
       expect({ sql, errors: (await check(sql, cfg, { schema })).errors.join() }).toEqual({
         sql,

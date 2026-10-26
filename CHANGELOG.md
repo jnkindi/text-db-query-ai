@@ -18,7 +18,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - **Generator methods and options.** `QueryGenerator.repairQuery()` and `explainQuery()`. `config.llmProvider` takes any `BaseLLMProvider` instead of creating one from `llm`. `config.logger` receives debug messages instead of `console.log`, with the API key redacted. `QueryResult.metadata.attempts` (model calls used) and `metadata.unknownIdentifiers`.
 - **LLM options** (`LLMConfig`, and the same names in `EasySetupConfig`): `baseURL`, `timeout`, `maxRetries`, `defaultHeaders`; for OpenAI `reasoningEffort` and `tokenLimitParam`; for Claude `effort`, `fallbacks` and `promptCaching`.
 - `BaseLLMProvider.generateWithSystem(system, prompt)`, with a default that joins the two and calls `generate()`, so existing subclasses keep working.
-- **Security options** (`SecurityConfig`): `allowUnion`, `blockedFunctions`, `allowedFunctions`, `rowLevelSecurityColumn` and `enforceSensitiveColumns`.
+- **Security options** (`SecurityConfig`): `allowUnion`, `blockedFunctions`, `allowedFunctions`, `rowLevelSecurityColumn`, `enforceSensitiveColumns` and `restrictedColumnsMatch` (`'contains'`, the default and the 0.0.1 behavior for column names, or `'exact'`).
 - `SecurityValidator` takes an optional second argument `{ databaseType, schema }` (`SecurityValidatorOptions`). `QuerySanitizer` takes an optional `databaseType`, and has a new `enforceLimit(query, limit)` that also lowers a larger limit.
 - **SQL analysis API.** `analyzeSql`, `tokenize`, `toSqlDialect`, `SqlLexError`, `sqlReadings`, `DEFAULT_BLOCKED_FUNCTIONS`, `isBlockedFunction`, `quoteIdentifier`, `formatIdentifier` and `needsQuoting`, with their types. This is the zero-dependency, dialect-aware lexer that the validator, sanitizer, row-level security and identifier check are built on.
 - **Introspection options** (`SchemaExtractionOptions`): `schema` (default `public` on Postgres, `dbo` on SQL Server, the current database on MySQL) and `includeEnumValues` (default true).
@@ -78,10 +78,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 Each line is one reason, with examples. All of them are dangerous or malformed; `tests/compat/security-differential.test.ts` checks the list against the published 0.0.1 build.
 
 - Stacked statements are rejected even with a trailing ";" (0.0.1 accepted `SELECT 1; DELETE FROM users;`).
-- T-SQL statements that follow another without ";" (`SELECT 1 DELETE FROM t`, `... WAITFOR`, `SHUTDOWN`, `SET`) count as multiple statements on mssql and in the generic dialect.
+- T-SQL statements that follow another without ";" count as multiple statements on mssql and in the generic dialect: `SELECT 1 DELETE FROM t`, `... WAITFOR`, `SHUTDOWN`, `SET`, and a second top-level query (`SELECT * FROM orders SELECT * FROM secrets`, `... WITH x AS (...) SELECT ...`, `... (SELECT ...)` after a complete expression). SQL Server runs each one, and the driver returns the first. A second query continues the statement only after `UNION`, `INTERSECT` or `EXCEPT`, as the source of `INSERT`, or as an operand.
 - `SELECT ... INTO` (a new table, a variable, `INTO OUTFILE` / `DUMPFILE`) is rejected.
 - Locking reads (`FOR UPDATE`, `FOR NO KEY UPDATE`, `FOR SHARE`, `FOR KEY SHARE`, `LOCK IN SHARE MODE`) are rejected.
 - Calls to functions that sleep, read or write server files, open connections, change settings, take locks, advance sequences or run SQL from a string (`DEFAULT_BLOCKED_FUNCTIONS`, configurable with `blockedFunctions` / `allowedFunctions`) are rejected. Examples: `pg_sleep`, `pg_read_file`, `lo_export`, `set_config`, `dblink`, `pg_terminate_backend`, `ts_stat`, `query_to_xml`, `nextval`, `LOAD_FILE`, `SLEEP`, `BENCHMARK`, `GET_LOCK`, `load_extension`, `readfile`, `writefile`, `fsdir`, `eval`, `OPENQUERY`.
+- `NEXT VALUE FOR` (T-SQL), which advances a sequence like the blocked `nextval`, is rejected.
+- With a schema, `SELECT *` and `t.*` over a table that has a restricted column (or a sensitive one with `enforceSensitiveColumns`) are rejected, since they return that column. `EXISTS (SELECT * ...)` and `COUNT(t.*)` return no column values and are accepted.
 - Reading credential tables (`pg_shadow`, `pg_authid`, `pg_user_mapping(s)`, `mysql.user`, `sys.sql_logins`, `syslogins`) is rejected.
 - Data-modifying statements nested in a query (writable CTEs, `(DELETE ...)`) need their operation in `allowedOperations`; upserts (`ON CONFLICT DO UPDATE`, `ON DUPLICATE KEY UPDATE`, `INSERT OR REPLACE`) need `UPDATE`.
 - ODBC escape sequences (`{fn ...}`, `{oj ...}`, `{d ...}`, `{t ...}`, `{ts ...}`, `{call ...}`, `{escape ...}`) are rejected: they are server-side syntax that generated SQL never needs.
@@ -89,6 +91,7 @@ Each line is one reason, with examples. All of them are dangerous or malformed; 
 - On MySQL and in the generic dialect, a string whose end depends on backslash escaping (`NO_BACKSLASH_ESCAPES`) is rejected; write quotes as `''` instead of `\'`.
 - In the generic dialect (no `databaseType`) `#` starts a MySQL comment but is an operator to Postgres, so queries with `#` are rejected; set `databaseType`.
 - In the generic dialect `$...$` is a Postgres dollar-quoted string to the database but code to the validator, so it is rejected; set `databaseType`.
+- In the generic dialect Postgres forms such as `ARRAY(SELECT ...)`, `LATERAL (SELECT ...)` and `DELETE ... USING (SELECT ...)` are rejected, because SQL Server reads the word as an alias followed by a second statement; set `databaseType: 'postgres'`.
 - MySQL `#` comments in a query given straight to `validate()` are reported like `--` and `/*` (the sanitizer removes them in the generator).
 - The row limit is read per dialect: MySQL `LIMIT offset, count`; `TOP n`; `FETCH FIRST n ROWS`; `LIMIT -1` (unlimited in SQLite); hex and exponent counts. 0.0.1 read only the first digits after `LIMIT`.
 - A row count that is not a plain number (an expression, a subquery, `TOP`/`FETCH ... PERCENT`) can be neither checked against `maxRowLimit` nor lowered, so it is rejected. `LIMIT ALL` and a lone parameter still only warn.
@@ -99,7 +102,7 @@ Each line is one reason, with examples. All of them are dangerous or malformed; 
 
 - Names and strings that contain a keyword: `created_at`, `grants`, `executed_at`, `executor_id`, `altered`, `revoked_at`, `truncated`, `'dropped'`, `'please EXEC this'`.
 - `--`, `/*` and `;` inside string literals.
-- Restricted columns match exact identifiers: `restrictedColumns: ['password']` no longer blocks `password_updated_at`.
+- `restrictedColumns` no longer matches inside strings, comments, table names or function names: `WHERE note = 'password'`, `FROM passwords` and `has_password(id)` are accepted. Column names still match by fragment, as in 0.0.1 (`password` restricts `password_hash`); set `restrictedColumnsMatch: 'exact'` to restrict only a column named `password`.
 - CTEs (`WITH recent AS (...) SELECT ...`) and queries that start with `(`.
 - A large `LIMIT` inside a subquery when the top-level limit is within `maxRowLimit`.
 
@@ -110,8 +113,8 @@ Each line is one reason, with examples. All of them are dangerous or malformed; 
 - The filter goes before GROUP BY, HAVING, ORDER BY and LIMIT instead of after GROUP BY.
 - `WHERE user_id = 999` (or any other value) no longer skips the filter: the result is `WHERE user_id = 999 AND user_id = 5`.
 - Each UNION, INTERSECT and EXCEPT branch gets the filter, not just the last one.
-- With joins, the filter is qualified with the first table that has the column according to the schema (`WHERE o.user_id = 5`).
-- Every other read of a table that holds user rows (subqueries, CTE bodies, derived tables, extra joins, self-joins, the source of `INSERT ... SELECT`) is replaced by a filtered derived table, for example `(SELECT id, user_id, total FROM orders AS __rls WHERE __rls.user_id = 5) orders`. Without a schema every table is assumed to hold user rows, so a lookup table in a subquery makes the query fail instead of leak.
+- With joins, the filter is qualified with the first table that has the column according to the schema (`WHERE o.user_id = 5`). When the schema shows no table at that level with the column, the unqualified 0.0.1 filter is kept, so it binds to the table or derived table that really has it (or the query fails).
+- Every other read of a table that holds user rows (subqueries, CTE bodies, derived tables, extra joins, self-joins, the source of `INSERT ... SELECT`) is replaced by a filtered derived table, for example `(SELECT * FROM orders AS __rls WHERE __rls.user_id = 5) orders`. The columns are listed only when restricted or sensitive ones must be left out. Without a schema every table is assumed to hold user rows, so a lookup table in a subquery makes the query fail instead of leak. Only filters the rewriter adds count as covering a table, except an existing `col = value` on a single-table query.
 - String user ids are escaped, and invalid ids throw `SECURITY_VALIDATION_FAILED` (see Security). Without a `databaseType`, a string id that contains a backslash throws, because no literal is safe for every database.
 - `rowLevelSecurityColumn` selects the column (default `user_id`).
 
@@ -128,6 +131,7 @@ Each line is one reason, with examples. All of them are dangerous or malformed; 
 #### Generator limits
 
 - Without `security.maxRowLimit`, the generator still adds no LIMIT, but now lowers a `LIMIT` above 1000 (the validator's default maximum) instead of failing validation.
+- On SQL Server a limit is added as `TOP n`; a `UNION` (or other set operation) is limited as a whole with `OFFSET 0 ROWS FETCH NEXT n ROWS ONLY`, after an added `ORDER BY 1` when it has none, instead of `TOP n` in every branch. 0.0.1 appended `LIMIT n`, which SQL Server rejects.
 
 #### Introspection output
 

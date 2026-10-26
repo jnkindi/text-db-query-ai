@@ -401,7 +401,8 @@ const security: SecurityConfig = {
 |---|---|---|
 | `allowedOperations` | `['SELECT']` | Statement types allowed: `SELECT`, `INSERT`, `UPDATE`, `DELETE`. Also applies to data-changing statements nested in a query (writable CTEs); upserts (`ON CONFLICT DO UPDATE`, `ON DUPLICATE KEY UPDATE`, `INSERT OR REPLACE`) need `UPDATE`. |
 | `allowedTables` | all | Every table reference (joins, subqueries, comma lists, quoted names) must be listed. Case-insensitive; the qualification must match: `'orders'` allows `orders` but not `shop.orders`, and `'shop.orders'` does not allow a bare `orders`. CTE names are not tables. |
-| `restrictedColumns` | none | Columns that may not appear. Exact identifiers, so `password` does not block `password_updated_at`. `'table.column'` restricts that table only, through its aliases. With a schema, `*`, `t.*` and whole-row functions (`row_to_json(t)` and similar) count as reading every column. |
+| `restrictedColumns` | none | Columns that may not appear. A bare entry restricts every column whose name contains it, as in 0.0.1 (`password` also restricts `password_hash`); strings, comments, table and function names never match. `'table.column'` restricts that table's column only, through its aliases. With a schema, `*`, `t.*` and whole-row functions (`row_to_json(t)` and similar) count as reading every column; `EXISTS (SELECT * ...)` and `COUNT(t.*)` do not. |
+| `restrictedColumnsMatch` | `'contains'` | `'exact'` restricts only columns named exactly like a bare entry. |
 | `maxRowLimit` | 1000 in the validator | A top-level `LIMIT`, `TOP` or `FETCH FIRST` above it is rejected, and so is a count that is not a plain number (an expression, a subquery, `PERCENT`). No limit, `LIMIT ALL` and a lone placeholder (`?`, `$1`, `:name`) only produce a warning. The generator adds the limit when it is missing and lowers a larger one. Without `maxRowLimit` the generator adds no limit, as in 0.0.1, but lowers one above 1000 instead of failing. |
 | `requireUserContext` | `true` | Reject requests without a user context. |
 | `enableRowLevelSecurity` | `true` in the validator | Add a `user_id = <userId>` filter (see below). The generator applies it only when this is set to `true` in its config and a user context is given, as in 0.0.1. |
@@ -414,11 +415,11 @@ const security: SecurityConfig = {
 
 Rejected whatever `allowedOperations` says. Keywords are matched as tokens where they act, never inside names, quoted identifiers or strings:
 
-- more than one statement, also when the last one ends in `;` (and, on SQL Server or without a database type, statements that follow each other without `;`)
+- more than one statement, also when the last one ends in `;` (and, on SQL Server or without a database type, statements that follow each other without `;`, including a second top-level query such as `SELECT * FROM orders SELECT * FROM secrets`)
 - comments in a query given straight to `validate()` (the generator removes them first)
 - `DROP`, `TRUNCATE`, `ALTER`, `CREATE`, `GRANT`, `REVOKE`, `EXEC`/`EXECUTE`, `xp_cmdshell`, `sp_executesql`
 - `SELECT ... INTO`, `INTO OUTFILE`, `INTO DUMPFILE`, and locking reads (`FOR UPDATE`, `FOR SHARE`, `LOCK IN SHARE MODE`)
-- credential tables (`pg_shadow`, `pg_authid`, `pg_user_mapping(s)`, `mysql.user`, `sys.sql_logins`, `syslogins`)
+- credential tables (`pg_shadow`, `pg_authid`, `pg_user_mapping(s)`, `mysql.user`, `sys.sql_logins`, `syslogins`), and `NEXT VALUE FOR` (it advances a sequence)
 - ODBC escapes (`{fn ...}`, `{oj ...}`, `{call ...}`), MySQL executable comments (`/*! ... */`), and malformed SQL (unterminated strings, quoted names or comments, unbalanced parentheses)
 - unless listed in `allowedFunctions`: functions that sleep, read or write server files, run programs, open connections, change settings, take locks, advance sequences or run SQL given as a string (`pg_sleep`, `pg_read_file`, `dblink`, `set_config`, `nextval`, `SLEEP`, `LOAD_FILE`, `load_extension`, `OPENROWSET`, `xp_*` and the rest of `DEFAULT_BLOCKED_FUNCTIONS`)
 
@@ -442,7 +443,7 @@ const sql = sanitizer.enforceLimit(sanitizer.sanitize(sqlFromSomewhere), 100);
 const { valid, errors, warnings } = await validator.validate(sql, { userId: 42, role: 'user' });
 ```
 
-- **`databaseType`** decides how quotes, comments, escapes and parameters are read. Without it (as with the 0.0.1 constructor), the validator must accept only what every supported database reads the same way, so it rejects `#` (a MySQL comment but a Postgres operator), dollar-quoted strings, `--` followed by a non-space, and strings whose end depends on backslash escaping; and row-level security refuses string user ids that contain a backslash.
+- **`databaseType`** decides how quotes, comments, escapes and parameters are read. Without it (as with the 0.0.1 constructor), the validator must accept only what every supported database reads the same way, so it rejects `#` (a MySQL comment but a Postgres operator), dollar-quoted strings, `--` followed by a non-space, strings whose end depends on backslash escaping, and Postgres forms that SQL Server would read as two statements (`ARRAY(SELECT ...)`, `LATERAL (SELECT ...)`, `USING (SELECT ...)`); and row-level security refuses string user ids that contain a backslash.
 - **`schema`** lets `*`, `t.*` and whole-row functions count as reading restricted and sensitive columns, enables the sensitive-column warning, and tells row-level security which tables hold user rows. Without a schema, `SELECT *` is not checked against `restrictedColumns`.
 
 ### Row-level security
@@ -463,10 +464,10 @@ SELECT o.id, u.email FROM orders o JOIN users u ON u.id = o.user_id
 -- every other read of a user table (subqueries, CTE bodies, derived tables, more joins) is wrapped
 SELECT id FROM orders WHERE total > (SELECT AVG(total) FROM orders)
   -> SELECT id FROM orders WHERE total > (SELECT AVG(total) FROM
-       (SELECT id, user_id, total, status FROM orders AS __rls WHERE __rls.user_id = 5) orders) AND user_id = 5
+       (SELECT * FROM orders AS __rls WHERE __rls.user_id = 5) orders) AND user_id = 5
 ```
 
-Each UNION, INTERSECT and EXCEPT branch gets its own filter. Numbers are inlined; strings are quoted with `'` doubled (and `\` doubled on MySQL); any other value throws `SECURITY_VALIDATION_FAILED`.
+Each UNION, INTERSECT and EXCEPT branch gets its own filter. A wrapped table lists its columns only when restricted or sensitive ones must be left out. When the schema shows no table of a join with the column, the unqualified 0.0.1 filter is used, so it binds to whichever table or derived table really has it. Numbers are inlined; strings are quoted with `'` doubled (and `\` doubled on MySQL); any other value throws `SECURITY_VALIDATION_FAILED`.
 
 Know its limits:
 
