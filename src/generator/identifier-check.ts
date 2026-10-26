@@ -391,8 +391,9 @@ export class IdentifierChecker {
       if (this.dialect !== 'postgres' || !this.schema.exactNames) return;
       const folded = quoted ? name : key;
       if (list.some((c) => c.name === folded)) return;
-      // A hidden column is not offered as the quoting fix: the reference is reported as unknown.
-      const shown = match ? undefined : list.find((c) => !entry.hiddenColumns.has(c));
+      // A hidden column, or any column of a hidden table, is not offered as the quoting fix:
+      // the reference is reported as unknown.
+      const shown = match || entry.hidden ? undefined : list.find((c) => !entry.hiddenColumns.has(c));
       if (shown) {
         match = shown;
         owner = entry;
@@ -416,8 +417,11 @@ export class IdentifierChecker {
       return;
     }
 
+    // Suggestions come only from tables the model is shown: naming a hidden table in the
+    // query must not reveal its columns
     const pool: string[] = [];
     for (const entry of tables) {
+      if (entry.hidden) continue;
       for (const list of entry.columns.values()) for (const c of list) if (!entry.hiddenColumns.has(c)) pool.push(c.name);
     }
     const suggestions = closestNames(name, pool);

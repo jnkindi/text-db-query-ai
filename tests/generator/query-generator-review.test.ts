@@ -126,6 +126,16 @@ describe('IdentifierChecker options', () => {
     expect(checker.check('SELECT note FROM orders')[0].message).toBe('Unknown column note: no table in the query (orders) has it');
   });
 
+  it('never suggests a column of a hidden table, even when the query names that table', () => {
+    // The model guessed the hidden table; its columns must not be revealed through suggestions
+    const [issue] = checker.check('SELECT a.notes FROM audit_log a');
+    expect(issue).toMatchObject({ kind: 'unknown_column', suggestions: undefined });
+    expect(issue.message).not.toMatch(/did you mean/);
+    const exact = new IdentifierChecker({ ...USERS, exactNames: true }, 'postgres', { hideTable: (table) => table.name === 'audit_log' });
+    // A wrongly cased column of a hidden table is not offered as the quoting fix either
+    expect(JSON.stringify(exact.check('SELECT a."Note" FROM audit_log a'))).not.toContain('"note"');
+  });
+
   it('suggests everything without options', () => {
     const plain = new IdentifierChecker(USERS, 'postgres');
     expect(plain.check('SELECT u.passwordhash FROM users u')[0].suggestions).toEqual(['password_hash']);
