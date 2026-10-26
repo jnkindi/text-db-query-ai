@@ -1,72 +1,46 @@
 /**
  * JavaScript ESM Usage Example
  *
- * This example shows how to use text-db-query-ai with ES Modules
+ * The same API from an ES module, with an in-memory SQLite database and a
+ * generator only: the query is generated and validated, and you execute it.
+ *
+ * Run: ANTHROPIC_API_KEY=... node javascript-esm.mjs
+ * (the package must be installed; see README.md in this folder)
  */
 
-import { Sequelize, DataTypes } from 'sequelize';
-import { createChatbotFromSequelize } from 'text-db-query-ai';
+import sqlite3 from 'sqlite3';
+import { createFromDatabase, TextToQueryError } from 'text-db-query-ai';
 
-async function main() {
-  console.log('JavaScript (ESM) Usage Example\n');
-  console.log('='.repeat(60));
+const db = new sqlite3.Database(':memory:');
 
-  // Initialize Sequelize
-  const sequelize = new Sequelize('sqlite::memory:', {
-    logging: false,
+/**
+ * Run SQL and resolve to its rows.
+ * @param {string} sql
+ * @returns {Promise<unknown[]>}
+ */
+const all = (sql) => new Promise((resolve, reject) => db.all(sql, (err, rows) => (err ? reject(err) : resolve(rows))));
+
+await all('CREATE TABLE products (id INTEGER PRIMARY KEY, name TEXT NOT NULL, price REAL, category TEXT)');
+await all("INSERT INTO products (name, price, category) VALUES ('Keyboard', 49.5, 'hardware'), ('Mouse', 19.9, 'hardware'), ('IDE licence', 89, 'software')");
+
+if (!process.env.ANTHROPIC_API_KEY) {
+  console.log('Set ANTHROPIC_API_KEY to ask questions.');
+} else {
+  // The model defaults to 'claude-opus-5-5'
+  const generator = await createFromDatabase(db, 'sqlite', {
+    llmProvider: 'claude',
+    apiKey: process.env.ANTHROPIC_API_KEY,
+    security: { allowedOperations: ['SELECT'], maxRowLimit: 50, requireUserContext: false },
   });
 
-  // Define models
-  const User = sequelize.define('User', {
-    id: {
-      type: DataTypes.INTEGER,
-      primaryKey: true,
-      autoIncrement: true,
-    },
-    email: {
-      type: DataTypes.STRING,
-      allowNull: false,
-    },
-    name: {
-      type: DataTypes.STRING,
-    },
-  });
-
-  await sequelize.sync();
-  console.log('✓ Database synced');
-
-  // Create sample data
-  await User.create({
-    email: 'jane@example.com',
-    name: 'Jane Smith',
-  });
-
-  console.log('✓ Sample data created\n');
-
-  // Create chatbot - ESM syntax!
-  const chatbot = await createChatbotFromSequelize(sequelize, {
-    llmProvider: 'openai',
-    apiKey: process.env.OPENAI_API_KEY || 'your-api-key',
-    security: {
-      allowedOperations: ['SELECT'],
-      maxRowLimit: 50,
-    },
-  });
-
-  console.log('✓ Chatbot created (ESM style)\n');
-
-  console.log('='.repeat(60));
-  console.log('\nESM Usage Complete!');
-  console.log('\nKey Points:');
-  console.log('  ✓ Works with ES Modules (import)');
-  console.log('  ✓ Modern JavaScript syntax');
-  console.log('  ✓ Node.js 16+ required');
-  console.log('  ✓ Same API as CommonJS');
-
-  await sequelize.close();
+  try {
+    const { query, metadata } = await generator.generateQuery('Cheapest product in each category');
+    console.log(query, metadata);
+    console.table(await all(query));
+  } catch (error) {
+    if (error instanceof TextToQueryError) console.error(`${error.code}: ${error.message}`);
+    else throw error;
+  }
 }
 
-main().catch((error) => {
-  console.error('Error:', error.message);
-  process.exit(1);
-});
+db.close();

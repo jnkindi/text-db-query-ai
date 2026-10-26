@@ -1,148 +1,118 @@
 # Examples
 
-This directory contains practical examples demonstrating how to use text-db-query-ai in real-world scenarios.
+Practical examples of text-db-query-ai. The TypeScript examples import the package source (`../src`) and run with ts-node; the JavaScript examples import `text-db-query-ai` by name, as an application would.
 
-## Available Examples
+Some examples show something without an API key (`reduce-hallucinations.ts`, `advanced-security.ts` and the JavaScript examples): they run that part first and stop before the first model call when the key is not set.
 
-### 1. Basic Usage (`basic-usage.ts`)
-The simplest way to get started with text-db-query-ai.
+## Available examples
 
-**Topics covered:**
-- Initial configuration
-- API key validation
-- Generating queries from natural language
-- Handling query results
-- Getting query explanations
+### `basic-usage.ts`
+A query generator with a hand-written schema: API key check, generating queries, warnings and metadata, explanations.
 
-**Run it:**
 ```bash
-npm run basic
+OPENAI_API_KEY=... npx ts-node basic-usage.ts
 ```
 
-### 2. Advanced Security (`advanced-security.ts`)
-Comprehensive security features demonstration.
+### `reduce-hallucinations.ts`
+Fewer invented tables and columns: an exact schema (`exactNames`, descriptions, `enumValues`, `sampleValues`), `examples`, `instructions`, the identifier check (`identifierCheck`, `maxCorrectionAttempts`), `checkIdentifiers()`, and questions the schema cannot answer (`CANNOT_ANSWER`).
 
-**Topics covered:**
-- Role-based access control
-- Sensitive data protection
-- Custom validation rules
-- Row-level security
-- SQL injection prevention
-- Security testing scenarios
-
-**Run it:**
 ```bash
-npm run security
+ANTHROPIC_API_KEY=... npx ts-node reduce-hallucinations.ts
 ```
 
-### 3. Express.js Chatbot API (`chatbot-express.ts`)
-A complete REST API for a database chatbot.
+### `advanced-security.ts`
+A locked-down setup: read-only, `allowedTables`, restricted and sensitive columns, `maxRowLimit`, row-level security, `blockedFunctions` and a role check written with `analyzeSql()`. Shows what the validator blocks and how row-level security rewrites queries, then runs the same policy through the generator.
 
-**Topics covered:**
-- Express.js integration
-- Database connection pooling
-- Authentication middleware
-- Error handling
-- Health checks
-- Production-ready structure
-
-**Run it:**
 ```bash
-npm run express
+ANTHROPIC_API_KEY=... npx ts-node advanced-security.ts
+```
+
+### `chatbot-express.ts`
+A REST API: authentication middleware, generation, read-only execution on PostgreSQL, error mapping (including `CANNOT_ANSWER`), schema and health endpoints.
+
+```bash
+OPENAI_API_KEY=... DB_USER=chatbot_reader DB_PASSWORD=... npx ts-node chatbot-express.ts
+```
+
+### `direct-database.ts`
+Schema introspection without an ORM, for PostgreSQL, MySQL or SQLite, with `ChatbotHelper` (generate and execute) or a generator only.
+
+```bash
+DB=postgres DATABASE_URL=postgres://... OPENAI_API_KEY=... npx ts-node direct-database.ts
+DB=sqlite SQLITE_FILE=./mydb.sqlite OPENAI_API_KEY=... npx ts-node direct-database.ts
+```
+
+### `prisma-integration.ts`
+Schema from Prisma (`createChatbotFromPrisma`, `createFromPrisma`), BigInt results, a chatbot built from parts, and `parsePrismaSchema()` for a schema file without a connection. Needs `@prisma/client` and a generated client (see the file header).
+
+### `javascript-usage.js` and `javascript-esm.mjs`
+Plain JavaScript from CommonJS and from an ES module, with an in-memory SQLite database.
+
+```bash
+OPENAI_API_KEY=... node javascript-usage.js
+ANTHROPIC_API_KEY=... node javascript-esm.mjs
 ```
 
 ## Setup
 
-1. Install dependencies:
-```bash
-npm install
-```
+1. Install the example dependencies:
 
-2. Create a `.env` file:
-```bash
-cp ../.env.example .env
-```
+   ```bash
+   npm install
+   ```
 
-3. Add your API keys to `.env`:
-```
-OPENAI_API_KEY=sk-...
-# or
-ANTHROPIC_API_KEY=sk-ant-...
-```
+2. For the JavaScript examples, build the package and install it here:
 
-4. Run any example:
-```bash
-npm run basic
-npm run security
-npm run express
-```
+   ```bash
+   (cd .. && npm install && npm run build)
+   npm install --no-save ..
+   ```
+
+3. Set an API key in the environment (or in a `.env` file you load yourself; see `../.env.example`):
+
+   ```bash
+   export OPENAI_API_KEY=sk-...
+   # or
+   export ANTHROPIC_API_KEY=sk-ant-...
+   ```
 
 ## Testing the Express API
 
-Start the server:
 ```bash
-npm run express
+OPENAI_API_KEY=... npx ts-node chatbot-express.ts
 ```
 
-Send a chat message:
+Ask a question:
+
 ```bash
 curl -X POST http://localhost:3000/api/chat \
   -H "Content-Type: application/json" \
   -H "x-user-id: 123" \
   -H "x-user-role: user" \
-  -d '{"message": "Show me all users"}'
+  -d '{"message": "Show my orders from last week"}'
 ```
 
-Get query explanation:
+Get a query and its explanation:
+
 ```bash
 curl -X POST http://localhost:3000/api/explain \
   -H "Content-Type: application/json" \
   -H "x-user-id: 123" \
   -H "x-user-role: user" \
-  -d '{"message": "Find top customers"}'
+  -d '{"message": "What did I spend per month this year?"}'
 ```
 
 Check health:
+
 ```bash
 curl http://localhost:3000/api/health
 ```
 
-## Customization
+## Databases
 
-Each example can be customized:
+The examples use PostgreSQL and SQLite; the package also supports MySQL and SQL Server. Set `databaseType` (or the second argument of the `create*` functions) to `'postgres'`, `'mysql'`, `'sqlite'` or `'mssql'`.
 
-- Modify the database schema
-- Change security rules
-- Add new tables
-- Adjust LLM settings
-- Add custom validation
+## More
 
-## Real-World Integration
-
-These examples can be adapted for:
-
-- Discord bots
-- Slack apps
-- WhatsApp chatbots
-- Telegram bots
-- Web applications
-- Mobile app backends
-- Internal tools
-- Admin dashboards
-
-## Database Support
-
-While examples use PostgreSQL, the package supports:
-- PostgreSQL
-- MySQL
-- SQLite
-- MongoDB
-- MS SQL Server
-
-Just change `databaseType` in the config.
-
-## Need More Help?
-
-- Check the main [README.md](../README.md)
-- Read [QUICKSTART.md](../QUICKSTART.md)
-- Open an issue on GitHub
+- The main [README](../README.md): every option, the security model and the API reference
+- The [CHANGELOG](../CHANGELOG.md): what changed in 0.1.0
