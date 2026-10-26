@@ -161,6 +161,8 @@ export const COVERAGE_KEEPS_MEANING: Array<readonly [string, string]> = [
   ['join with a lookup table', 'SELECT o.id, p.name FROM orders o JOIN products p ON p.id = o.product_id'],
   ['protected table joined in, sensitive column left out', 'SELECT a.email FROM orders o JOIN accounts a ON a.user_id = o.user_id'],
   ['plain filter', 'SELECT id, total FROM orders WHERE total > 5'],
+  // The level's own table has no user column; the filter must bind to the derived table's
+  ['lookup table joined to a per-user aggregate', 'SELECT p.name, t.cnt FROM products p JOIN (SELECT user_id, product_id, COUNT(*) AS cnt FROM orders GROUP BY user_id, product_id) t ON t.product_id = p.id'],
 ];
 
 /** Rows as order-independent, driver-independent strings (BigInt counts included). */

@@ -80,8 +80,35 @@ describeSqlite('row-level security covers every read (SQLite)', () => {
       const pg = new SecurityValidator(CONFIG, { databaseType: 'postgres', schema: coverageSchema('postgres') });
       // An unqualified filter inside the subquery would bind to the outer orders, since o renames user_id away.
       expect(pg.addRowLevelSecurity('SELECT id, (SELECT SUM(t) FROM orders AS o(a, b, c, t)) AS s FROM orders', USER)).toBe(
-        'SELECT id, (SELECT SUM(t) FROM (SELECT id, user_id, product_id, total FROM orders AS __rls WHERE __rls.user_id = 1) AS o(a, b, c, t)) AS s FROM orders WHERE user_id = 1',
+        'SELECT id, (SELECT SUM(t) FROM (SELECT * FROM orders AS __rls WHERE __rls.user_id = 1) AS o(a, b, c, t)) AS s FROM orders WHERE user_id = 1',
       );
+    });
+
+    it('keeps columns a partial schema does not list', async () => {
+      // The schema omits orders.total; the wrapper must not drop it
+      const partial = coverageSchema('sqlite');
+      partial.tables = partial.tables.map((t) => (t.name === 'orders' ? { ...t, columns: t.columns.filter((c) => c.name !== 'total') } : t));
+      const v = new SecurityValidator(CONFIG, { databaseType: 'sqlite', schema: partial });
+      await expectSameRows(v, fullDb, ownDb, 'SELECT x.id, x.total FROM (SELECT * FROM orders) x', true);
+    });
+
+    it('lists columns only to leave out a restricted or sensitive one', () => {
+      expect(validator.addRowLevelSecurity('SELECT x.id FROM (SELECT * FROM orders) x', USER)).toBe(
+        'SELECT x.id FROM (SELECT * FROM (SELECT * FROM orders AS __rls WHERE __rls.user_id = 1) orders) x WHERE user_id = 1',
+      );
+      expect(validator.addRowLevelSecurity('SELECT x.id FROM (SELECT * FROM accounts) x', USER)).toBe(
+        'SELECT x.id FROM (SELECT * FROM (SELECT id, user_id, email FROM accounts AS __rls WHERE __rls.user_id = 1) accounts) x WHERE user_id = 1',
+      );
+    });
+
+    it('with an introspected schema, adds no filter where no table has the column', async () => {
+      const exact = new SecurityValidator(CONFIG, { databaseType: 'sqlite', schema: { ...SCHEMA, exactNames: true } });
+      expect(exact.addRowLevelSecurity('SELECT * FROM products', USER)).toBe('SELECT * FROM products');
+      // A hand-written schema may be partial, so the 0.0.1 filter stays
+      expect(validator.addRowLevelSecurity('SELECT * FROM products', USER)).toBe('SELECT * FROM products WHERE user_id = 1');
+      for (const [, sql] of [...COVERAGE_LEAKS, ...COVERAGE_KEEPS_MEANING]) {
+        await expectSameRows(exact, fullDb, ownDb, sql, true);
+      }
     });
 
     it('leaves lookup tables alone', () => {

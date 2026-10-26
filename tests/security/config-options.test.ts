@@ -152,8 +152,14 @@ describe('restrictedColumns', () => {
     ]) {
       expect({ sql, errors: (await check(sql, cfg)).errors }).toEqual({ sql, errors: [] });
     }
-    // A bare entry that is part of a keyword does not match the keyword
+    // A bare entry that is part of a reserved word does not match the word
     expect((await check('SELECT id FROM t ORDER BY id LIMIT 1', { restrictedColumns: ['or'] })).errors).toEqual([]);
+    // Unreserved keywords can be column names, so they are matched
+    for (const databaseType of ['mysql', undefined] as const) {
+      expect((await check('SELECT timestamp FROM t LIMIT 1', { restrictedColumns: ['time'] }, { databaseType })).errors).toEqual([
+        'Query accesses restricted columns: time',
+      ]);
+    }
   });
 
   it('reaches columns through * by name fragment too', async () => {

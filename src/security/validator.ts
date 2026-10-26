@@ -15,7 +15,7 @@ import {
   isBlockedFunction,
   formatIdentifier,
   sqlReadings,
-  SQL_KEYWORDS,
+  isReservedKeyword,
   SqlLexError,
   type LexOptions,
   type SqlAnalysis,
@@ -200,6 +200,18 @@ interface RlsState {
   edits: TextEdit[];
   /** Token indexes of tables a WHERE filter covers; every other user table is wrapped. */
   handled: Set<number>;
+}
+
+/** Where a branch's row-level filter goes (see rlsTarget). */
+interface RlsTarget {
+  table: LocatedTable;
+  qualify: boolean;
+  /** Tables of the branch the filter covers; the others that hold user rows get wrapped. */
+  covered: LocatedTable[];
+  /** Base tables on the branch's own level. */
+  direct: LocatedTable[];
+  /** The branch reads this one table and joins nothing else. */
+  alone: boolean;
 }
 
 /** Alias of the table inside the filtered derived table that replaces a user table. */
@@ -953,7 +965,9 @@ export class SecurityValidator {
     const addBare = (name: string, keyword: boolean): void => {
       const bare = rules.restrictedBare.get(name.toUpperCase());
       if (bare !== undefined) restricted.add(bare);
-      // A fragment never matches a keyword (`or` is not in ORDER), only names
+      // A fragment never matches a word the dialect reserves (`or` is not in ORDER):
+      // such a word cannot be an unquoted column there. Unreserved keywords such as
+      // timestamp or user can be columns, so they are matched.
       if (keyword) return;
       const lower = name.toLowerCase();
       for (const [fragment, entry] of rules.restrictedFragments) if (lower.includes(fragment)) restricted.add(entry);
@@ -978,7 +992,7 @@ export class SecurityValidator {
         const prev = t[i - 1];
         if (prev && prev.type === 'operator' && prev.value === '::') continue; // type name
         const written = tok.type === 'quoted' ? tok.value : tok.text;
-        addBare(written, tok.type === 'word' && SQL_KEYWORDS.has(tok.value));
+        addBare(written, tok.type === 'word' && isReservedKeyword(tok.value, this.dialect));
         const column = written.toUpperCase();
         const specific = rules.byColumn.get(column);
         if (specific) {
@@ -1375,13 +1389,15 @@ export class SecurityValidator {
       }
     }
 
-    const chosen = this.rlsTarget(st, bs, be, d, head === 'SELECT' && from >= 0 ? from : -1, where >= 0 ? where : boundary);
+    const target = this.rlsTarget(st, bs, be, d, head === 'SELECT' && from >= 0 ? from : -1, where >= 0 ? where : boundary);
+    if (target === 'skip') return;
+    const chosen = target;
     if (chosen) for (const l of chosen.covered) st.handled.add(l.index);
     const qualifier = chosen && chosen.qualify ? `${this.tableText(st, chosen.table)}.` : '';
     // An existing qualified `t.col = v` only stands in for the filter on a single-table
     // level without joins; anywhere else only an unqualified `col = v` (the same predicate
     // the filter would add) does.
-    const sameAs = chosen && !chosen.qualify && chosen.direct.length === 1 ? chosen.table : undefined;
+    const sameAs = chosen && chosen.alone ? chosen.table : undefined;
     const filter = `${qualifier}${st.column.text} = ${st.value}`;
 
     if (where < 0) {
@@ -1470,13 +1486,21 @@ export class SecurityValidator {
 
   /**
    * The table the filter belongs to, whether it must be qualified, and the
-   * tables of the branch it covers. With more than one table (or a join) in
-   * the branch: the first table that has the column according to the schema,
-   * else the first table. Without a schema, a branch with several tables keeps
-   * the unqualified 0.0.1 filter: it filters the one table that has the column,
-   * and makes the query fail as ambiguous when several have it. A table whose
-   * alias renames its columns is never covered that way (the name would bind
-   * elsewhere), so it gets wrapped instead.
+   * tables of the branch it covers; 'skip' when the branch needs no filter.
+   *
+   * - One table and no join: the 0.0.1 filter on it (`alone`).
+   * - With a schema, several tables or a join: the first table that holds user
+   *   rows (has the column, or is missing from the schema), qualified. When
+   *   none does, an introspected schema (exactNames, complete column lists)
+   *   needs no filter here, and a hand-written one, which may be partial,
+   *   keeps the unqualified 0.0.1 filter: it binds to whichever table or
+   *   derived table really has the column, or fails.
+   * - Without a schema, several tables keep the unqualified 0.0.1 filter, which
+   *   fails as ambiguous when several have the column; one table joined to
+   *   derived tables or functions gets it qualified.
+   *
+   * A table whose alias renames its columns is never covered by an unqualified
+   * filter (the name would bind elsewhere), so it gets wrapped instead.
    */
   private rlsTarget(
     st: RlsState,
@@ -1485,7 +1509,7 @@ export class SecurityValidator {
     d: number,
     from: number,
     fromEnd: number
-  ): { table: LocatedTable; qualify: boolean; covered: LocatedTable[]; direct: LocatedTable[] } | undefined {
+  ): RlsTarget | 'skip' | undefined {
     const { shape } = st;
     // Tables of this branch's own query level (parenthesized joins included, subqueries not)
     const scope = queryScopes(shape);
@@ -1502,26 +1526,41 @@ export class SecurityValidator {
       if (scope[st.tables[k].index] === level) direct.push(st.tables[k]);
     }
     if (direct.length === 0) return undefined;
-    if (direct.length > 1 && this.rules.schemaTables.size === 0) {
-      return { table: direct[0], qualify: false, covered: direct.filter((l) => !l.renamesColumns), direct };
-    }
-    let qualify = direct.length > 1;
-    if (!qualify && from >= 0) {
+
+    let joined = direct.length > 1;
+    if (!joined && from >= 0) {
       const t = shape.t;
       for (let i = from + 1; i < fromEnd; i++) {
         if (shape.depth[i] !== d) continue;
         if (isPunctAt(t, i, ',') || isWordAt(t, i, 'JOIN') || isWordAt(t, i, 'APPLY') || isWordAt(t, i, 'STRAIGHT_JOIN')) {
-          qualify = true;
+          joined = true;
           break;
         }
       }
     }
+    const unqualified = (): RlsTarget => ({
+      table: direct[0],
+      qualify: false,
+      covered: direct.filter((l) => !l.renamesColumns),
+      direct,
+      alone: false,
+    });
+
+    if (this.rules.schemaTables.size === 0) {
+      if (direct.length > 1) return unqualified();
+      return { table: direct[0], qualify: joined, covered: [direct[0]], direct, alone: !joined };
+    }
+
     const column = st.column.name.toUpperCase();
-    const withColumn = qualify
-      ? direct.find((l) => this.schemaTablesFor(l.ref).some((tb) => tb.columns.some((c) => c.name.toUpperCase() === column)))
-      : undefined;
-    const table = withColumn ?? direct[0];
-    return { table, qualify, covered: [table], direct };
+    const known = direct.filter((l) =>
+      this.schemaTablesFor(l.ref).some((tb) => (tb.columns ?? []).some((c) => c.name.toUpperCase() === column))
+    );
+    const unlisted = direct.filter((l) => this.schemaTablesFor(l.ref).length === 0);
+    const owned = [...known, ...unlisted];
+    if (owned.length === 0 && this.options.schema?.exactNames === true) return 'skip';
+    if (!joined) return { table: direct[0], qualify: false, covered: [direct[0]], direct, alone: true };
+    if (owned.length > 0) return { table: owned[0], qualify: true, covered: [owned[0]], direct, alone: false };
+    return unqualified();
   }
 
   /**
@@ -1563,15 +1602,16 @@ export class SecurityValidator {
   }
 
   /**
-   * Select list of a wrapped table: its schema columns without restricted or
-   * sensitive ones, so validating the rewritten query does not see them through
-   * a `*`. `*` when the schema does not pin down one table.
+   * Select list of a wrapped table: `*`, unless the schema shows restricted or
+   * sensitive columns in it. Then its schema columns without those, so that
+   * validating the rewritten query does not see them through the `*` (a
+   * partial schema then also drops the columns it does not list).
    */
   private wrapColumns(ref: TableReference): string {
     const tables = this.schemaTablesFor(ref);
     if (tables.length !== 1) return '*';
-    const columns = (tables[0].columns ?? [])
-      .map((c) => c.name)
+    const all = (tables[0].columns ?? []).map((c) => c.name);
+    const columns = all
       .filter((name) => {
         const key = name.toUpperCase();
         if (this.rules.restrictedBare.has(key)) return false;
@@ -1579,7 +1619,7 @@ export class SecurityValidator {
         if (this.rules.restrictedFragments.some(([fragment]) => lower.includes(fragment))) return false;
         return !(this.rules.byColumn.get(key) ?? []).some((rule) => this.tableMatches(rule, ref));
       });
-    if (columns.length === 0) return '*';
+    if (columns.length === 0 || columns.length === all.length) return '*';
     const exact = this.options.schema?.exactNames === true;
     return columns.map((name) => formatIdentifier(name, this.dialect, exact)).join(', ');
   }
