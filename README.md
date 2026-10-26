@@ -123,7 +123,7 @@ const chatbot = await createChatbotFromPrisma(prisma, 'postgres', {
 | Option | Applies to | What it does |
 |---|---|---|
 | `model` | both | Model ID. Defaults: `gpt-6-luna`, `claude-opus-5-5`. |
-| `maxTokens` | both | Output token limit, including reasoning or thinking tokens. Defaults: 8192 (OpenAI), 16000 (Claude). |
+| `maxTokens` | both | Output token limit, including reasoning or thinking tokens. Defaults: 8192 (OpenAI reasoning and current models), 1000 (non-reasoning OpenAI models such as gpt-4o and gpt-4.1, as in 0.0.1), 16000 (Claude). An answer cut off at the limit throws (`CLAUDE_INVALID_RESPONSE` with `stopReason: 'max_tokens'`, or `OPENAI_EMPTY_RESPONSE` with `reason: 'length'`) instead of returning a partial query. |
 | `temperature` | OpenAI | Sent only where it is accepted: non-reasoning models (gpt-4o, gpt-4.1, ...), custom `baseURL` endpoints, or `reasoningEffort: 'none'`. Default 0.1. Ignored for Claude, whose current API rejects sampling parameters. |
 | `baseURL` | both | API base URL, for OpenAI-compatible endpoints, proxies and gateways. |
 | `timeout` | both | Request timeout in milliseconds. |
@@ -137,7 +137,7 @@ const chatbot = await createChatbotFromPrisma(prisma, 'postgres', {
 
 Behavior worth knowing:
 
-- If the OpenAI API or a compatible server rejects `temperature`, `top_p`, `max_tokens`, `max_completion_tokens` or `reasoning_effort` as unsupported, the provider drops or swaps that field, retries once, and remembers the fix for later requests.
+- If the OpenAI API or a compatible server rejects `temperature`, `top_p`, `max_tokens`, `max_completion_tokens` or `reasoning_effort` as unsupported, the provider drops or swaps that field, retries once, and remembers the fix for later requests. If either API says the token limit is larger than the model can write, the request is retried once with the model's limit.
 - Claude requests are streamed and collected with `finalMessage()`, so a large `maxTokens` does not hit the SDK's limit for non-streaming requests. If the API rejects `fallbacks`, the request is sent once more without it.
 - A refusal or an empty answer is reported with the 0.0.1 error codes and extra fields: `OPENAI_EMPTY_RESPONSE` with `details.reason` (`'refusal'` or `'length'`), `CLAUDE_INVALID_RESPONSE` with `details.stopReason`.
 
@@ -686,7 +686,7 @@ The lower-level classes are exported too: `SecurityValidator`, `QuerySanitizer`,
 0.1.0 keeps every 0.0.1 export, method signature and error code, and the wording of the validator's error messages. What changes for existing code:
 
 - Queries 0.0.1 accepted but that are dangerous or malformed are now rejected; ordinary queries it wrongly rejected (`created_at`, CTEs, `'--'` in a string, ...) now pass. The [CHANGELOG](https://github.com/jnkindi/text-db-query-ai/blob/main/CHANGELOG.md) lists each case.
-- The default models are `gpt-6-luna` and `claude-opus-5-5`; the old Claude default was retired. Default `maxTokens` is 8192 (OpenAI) and 16000 (Claude) instead of 1000.
+- The default models are `gpt-6-luna` and `claude-opus-5-5`; the old Claude default was retired. Default `maxTokens` is 8192 (OpenAI reasoning and current models) and 16000 (Claude) instead of 1000; non-reasoning OpenAI models keep 1000.
 - The identifier check runs by default and can make one extra model call per question. To keep exactly one call per question and no new warnings, as in 0.0.1, set `maxCorrectionAttempts: 0` and `identifierCheck: 'off'`.
 - Row-level security now filters every read of a user table, so queries over several tables come back rewritten.
 - Node.js 18 or later is required.

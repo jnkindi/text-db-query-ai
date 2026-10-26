@@ -18,6 +18,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - **Generator methods and options.** `QueryGenerator.repairQuery()` and `explainQuery()`. `config.llmProvider` takes any `BaseLLMProvider` instead of creating one from `llm`. `config.logger` receives debug messages instead of `console.log`, with the API key redacted. `QueryResult.metadata.attempts` (model calls used) and `metadata.unknownIdentifiers`.
 - **LLM options** (`LLMConfig`, and the same names in `EasySetupConfig`): `baseURL`, `timeout`, `maxRetries`, `defaultHeaders`; for OpenAI `reasoningEffort` and `tokenLimitParam`; for Claude `effort`, `fallbacks` and `promptCaching`.
 - `BaseLLMProvider.generateWithSystem(system, prompt)`, with a default that joins the two and calls `generate()`, so existing subclasses keep working.
+- **Prompt and checker options.** `SchemaRenderOptions.security` (`allowedTables`, `restrictedColumns`, `restrictedColumnsMatch`) for `renderForModel()`, `getDialectRules({ allowedOperations })`, and an optional third `IdentifierChecker` argument `{ hideColumn, hideTable }`.
 - **Security options** (`SecurityConfig`): `allowUnion`, `blockedFunctions`, `allowedFunctions`, `rowLevelSecurityColumn`, `enforceSensitiveColumns` and `restrictedColumnsMatch` (`'contains'`, the default and the 0.0.1 behavior for column names, or `'exact'`).
 - `SecurityValidator` takes an optional second argument `{ databaseType, schema }` (`SecurityValidatorOptions`). `QuerySanitizer` takes an optional `databaseType`, and has a new `enforceLimit(query, limit)` that also lowers a larger limit.
 - **SQL analysis API.** `analyzeSql`, `tokenize`, `toSqlDialect`, `SqlLexError`, `sqlReadings`, `DEFAULT_BLOCKED_FUNCTIONS`, `isBlockedFunction`, `quoteIdentifier`, `formatIdentifier` and `needsQuoting`, with their types. This is the zero-dependency, dialect-aware lexer that the validator, sanitizer, row-level security and identifier check are built on.
@@ -29,7 +30,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - **Node.js 18 or later** (`engines`). 0.0.1 already failed on Node 16, which has no global `fetch`.
 - **Default models.** OpenAI: `gpt-6-luna` (was `gpt-4o-mini`, which OpenAI shuts down on 2027-01-14). Claude: `claude-opus-5-5` (was `claude-3-5-sonnet-20241022`, retired on 2025-10-28).
-- **OpenAI requests.** `max_completion_tokens` on api.openai.com and Azure OpenAI, `max_tokens` for other `baseURL` endpoints (override with `tokenLimitParam`). `temperature` is sent only to non-reasoning models (gpt-4o, gpt-4.1, ...), to custom endpoints, or with `reasoningEffort: 'none'`. A parameter the server reports as unsupported is dropped or swapped and the request is retried once. `maxTokens` defaults to 8192 (was 1000).
+- **OpenAI requests.** `max_completion_tokens` on api.openai.com and Azure OpenAI, `max_tokens` for other `baseURL` endpoints (override with `tokenLimitParam`). `temperature` is sent only to non-reasoning models (gpt-4o, gpt-4.1, ...), to custom endpoints, or with `reasoningEffort: 'none'`. A parameter the server reports as unsupported is dropped or swapped and the request is retried once. `maxTokens` defaults to 8192 for reasoning and other current models; non-reasoning models (gpt-4o, gpt-4.1, gpt-4, gpt-4-turbo, gpt-3.5-turbo, their snapshots and fine-tunes) keep the 0.0.1 default of 1000.
 - **Claude requests.** No `temperature` (the current API rejects sampling parameters) and no thinking parameter. Requests are streamed and collected with `finalMessage()`. `maxTokens` defaults to 16000 (was 1000). Server-side fallbacks (`fallbacks: 'default'`, beta `server-side-fallback-2026-07-01`) are on unless `fallbacks: false` or `baseURL` is not api.anthropic.com; if the API rejects them, the request is sent once more without. The system prompt is cached unless `promptCaching: false`. All text blocks are joined instead of reading only the first.
 - `validateApiKey()` lists models instead of sending a message, so it uses no tokens.
 - Both SDKs are loaded when a provider is created, not when the package is imported. The published `.d.ts` files no longer reference SDK types.
@@ -39,6 +40,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Optional peer dependency ranges are widened to `>=` the current majors, so Prisma 6 and 7 and sqlite3 6 can be installed. The unused `prisma` CLI peer dependency is dropped.
 
 ### Fixed
+
+- **Truncated answers.** An answer cut off at the output token limit is no longer returned as a finished query (0.0.1 returned the truncated text, so a query missing its WHERE clause could pass every check). Claude `stop_reason: 'max_tokens'` (or `'model_context_window_exceeded'`) throws `CLAUDE_INVALID_RESPONSE` with `details.stopReason` and `details.partialText`; OpenAI `finish_reason: 'length'` throws `OPENAI_EMPTY_RESPONSE` with `details: { reason: 'length', partialText }`. The messages say to raise `maxTokens`. This also applies to `generate()` and explanations.
+- When the API rejects the token limit as larger than the model can write (OpenAI "max_tokens is too large ... at most N", Anthropic "max_tokens: X > N"), the request is retried once with N, and that provider keeps using N.
+- **Identifier check false positives** (each cost a paid correction call by default): valid T-SQL (`NVARCHAR(MAX)` and other `(MAX)` lengths, `alias = expression` select items, `FOR JSON` / `FOR XML` options, `PIVOT` value lists, `UNPIVOT` output columns); system catalogs named by their schema (`sys.*` on SQL Server; `performance_schema`, `mysql` and `sys` on MySQL); qualified pseudo-columns (`t.rowid` on SQLite, `t.ctid`, `t.xmin`, `t.tableoid` on Postgres); index hints (`USE|FORCE|IGNORE INDEX|KEY (...)`, `INDEXED BY`, `WITH (INDEX(...))`), MySQL `MEMBER OF` and T-SQL `OUTPUT inserted./deleted.`. Unqualified `pg_*` names are still reported.
+- Correction feedback never suggests or lists restricted columns, columns marked sensitive, or tables outside `allowedTables` (also when the query names such a table), so correcting an invented `password` can no longer produce `password_hash`.
+- After corrections, the answer with the fewest unknown identifiers is returned (on a tie, the latest), with a warning when a correction is discarded. A leading `SQL:` label in the model's answer is removed before the query is checked.
+- `renderForModel()` qualifies a foreign key into the table's own non-default schema (`billing.invoice.id`, not `invoice.id`).
+- The SQLite dialect rule no longer recommends `LOWER()` for non-ASCII text; SQLite's built-in `lower()` and `LIKE` fold ASCII only.
+- Explanations (`generateQueryWithExplanation()`, `explainQuery()`, `ChatbotHelper`) are returned whole, as in 0.0.1: a fenced block inside the prose no longer replaces them.
+- A provider object with only `generate()` assigned to a generator works again: it receives the system prompt and the message joined.
+- `security: { maxRowLimit: undefined }` no longer lowers the model's LIMIT to 1000; the validator enforces no maximum then, as in 0.0.1.
+- SQLite introspection includes generated columns (STORED and VIRTUAL) through `pragma_table_xinfo` on SQLite 3.26+, with fallbacks for older versions.
+- `PrismaAdapter.executeQuery()` errors keep the 0.0.1 message and now carry the Prisma error's `code` and `meta`, with the Prisma error as `cause`; `ChatbotHelper` repair recognises them and treats "operator does not exist" (Postgres 42883) as repairable.
 
 - Stacked statements validated as one: `sanitize()` removed a trailing `;` before normalizing, so `SELECT id FROM t; DELETE FROM t; -- done` passed as a single SELECT. Comments are now removed token by token and only trailing semicolons are dropped.
 - Ordinary names and strings were rejected as SQL commands: `created_at` (CREATE), `grants` (GRANT), `'dropped'` (DROP), `executed_at` (EXEC), `altered`, `revoked_at`, `truncated`, `'--'`, `'/*'` or `';'` inside a string. A restricted column `password` also blocked `password_updated_at`.
@@ -120,9 +134,15 @@ Each line is one reason, with examples. All of them are dangerous or malformed; 
 
 #### Models and requests
 
-- The default models are now `gpt-6-luna` and `claude-opus-5-5`, and the default `maxTokens` 8192 and 16000 instead of 1000 (see Changed). Answers, latency and costs change accordingly. Pin `model` and `maxTokens` to control them.
+- The default models are now `gpt-6-luna` and `claude-opus-5-5`, and the default `maxTokens` 8192 and 16000 instead of 1000 (non-reasoning OpenAI models keep 1000; see Changed). Answers, latency and costs change accordingly. Pin `model` and `maxTokens` to control them.
 - `temperature` is no longer sent to Claude, nor to OpenAI reasoning models on api.openai.com.
 - The model gets a new system prompt and user message. `getSchema()` and `SchemaAnalyzer.generateSchemaPrompt()` still return the 0.0.1 text; the model sees `renderForModel()`. `generate()` on the built-in providers still sends the 0.0.1 system prompt.
+
+#### Prompt
+
+- With `allowedTables`, the system prompt shows only the allowed tables (and leaves out foreign keys and sensitive-column notes for the others). Restricted columns are marked `RESTRICTED`, and their sample values are not shown.
+- The model is asked to answer `CANNOT_ANSWER` when a question would need a table, column or operation the rules forbid. `RETURNING` is mentioned only when INSERT, UPDATE or DELETE is allowed, and the dialect rules add short pitfalls (integer division, Postgres `ROUND` on numeric, select aliases in WHERE, T-SQL ORDER BY in subqueries).
+- Few-shot examples are shown as a `<question>` block followed by the bare query instead of `Question:` / `SQL:` lines. For an unknown table with no close match, the correction feedback lists up to 20 schema tables.
 
 #### Identifier check on by default
 
@@ -154,8 +174,7 @@ Each line is one reason, with examples. All of them are dangerous or malformed; 
 The security fixes cannot be turned off. To keep the rest close to 0.0.1 (the README has a full example under "Upgrading from 0.0.1"):
 
 - Pin the model and the token limit: `model: 'gpt-4o-mini'` (until OpenAI shuts it down on 2027-01-14) and `maxTokens: 1000`. The old Claude default `claude-3-5-sonnet-20241022` no longer exists; pin a current model such as `claude-sonnet-5-5` instead.
-- `maxCorrectionAttempts: 0`: one model call per question, and invalid SQL fails at once, as in 0.0.1.
-- `identifierCheck: 'off'`: no unknown-identifier warnings and no `metadata.unknownIdentifiers`.
+- `identifierCheck: 'off'` together with `maxCorrectionAttempts: 0`: one model call per question, invalid SQL fails at once, and there are no unknown-identifier warnings or `metadata.unknownIdentifiers`, as in 0.0.1. Either option alone still leaves part of the new behavior.
 - Pass `{ databaseType }` to a `SecurityValidator` you create yourself, so the generic-dialect rejections above do not apply to queries your database reads unambiguously.
 
 ### Dependencies
