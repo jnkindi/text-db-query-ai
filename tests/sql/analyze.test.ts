@@ -357,7 +357,7 @@ describe('analyzeSql: aliases, CTE columns, stars and functions', () => {
 
   it('collects uppercased function names', () => {
     const a = analyzeSql('SELECT pg_catalog.pg_sleep(1), "MyFn"(x), lower(y), count(*) FROM t WHERE x IN (1) AND EXISTS (SELECT 1)');
-    expect(a.functions).toEqual(['PG_SLEEP', 'MYFN', 'LOWER', 'COUNT']);
+    expect(a.functions).toEqual(['PG_CATALOG.PG_SLEEP', 'MYFN', 'LOWER', 'COUNT']);
     expect(analyzeSql('SELECT CAST(x AS DECIMAL(10,2)), x::numeric(10,2) FROM t').functions).toEqual(['CAST']);
     expect(analyzeSql('MERGE INTO t USING s ON true WHEN NOT MATCHED THEN INSERT (a) VALUES (1)').functions).toEqual([]);
   });

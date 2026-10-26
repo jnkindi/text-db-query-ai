@@ -305,8 +305,9 @@ describe('tokenize: comments', () => {
     }
   });
 
-  it('mysql /*! ... */ is a comment token', () => {
-    expect(sig('SELECT 1 /*! ; DROP TABLE x */', 'mysql')).toEqual([
+  it('mysql /*! ... */ is refused, because the server runs its body', () => {
+    expect(() => tokenize('SELECT 1 /*! ; DROP TABLE x */', 'mysql')).toThrow(SqlLexError);
+    expect(sig('SELECT 1 /*! ; DROP TABLE x */', 'postgres')).toEqual([
       ['word', 'SELECT'],
       ['number', '1'],
       ['comment', '/*! ; DROP TABLE x */'],

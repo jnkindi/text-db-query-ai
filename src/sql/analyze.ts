@@ -221,6 +221,7 @@ const R_COLREF = 6; // part of a qualified column reference
 const isName = (t: Token | undefined): boolean => !!t && (t.type === 'word' || t.type === 'quoted');
 const isWord = (t: Token | undefined, v: string): boolean => !!t && t.type === 'word' && t.value === v;
 const isPunct = (t: Token | undefined, v: string): boolean => !!t && t.type === 'punct' && t.value === v;
+const isOperator = (t: Token | undefined, v: string): boolean => !!t && t.type === 'operator' && t.value === v;
 const nameOf = (t: Token): string => (t.type === 'quoted' ? t.value : t.text);
 
 /** Accumulates results across the statements of one analysis. */
@@ -477,12 +478,17 @@ class StatementAnalyzer {
     return c > k ? c : k;
   }
 
-  /** Case folding used to compare table names with CTE names. */
+  /**
+   * Name used to match table references with CTE names. Postgres folds
+   * unquoted names to lower case and SQLite compares names case-insensitively.
+   * MySQL and SQL Server may compare them case-sensitively (lower_case_table_names,
+   * a _CS collation) and generic may be either, so there a reference that only
+   * matches a CTE after folding stays a table.
+   */
   private foldName(tok: Token): string {
-    if (this.dialect === 'postgres' || this.dialect === 'generic') {
-      return tok.type === 'quoted' ? tok.value : tok.text.toLowerCase();
-    }
-    return nameOf(tok).toLowerCase();
+    if (this.dialect === 'postgres') return tok.type === 'quoted' ? tok.value : tok.text.toLowerCase();
+    if (this.dialect === 'sqlite') return nameOf(tok).toLowerCase();
+    return nameOf(tok);
   }
 
   private markAlias(k: number): void {
@@ -947,6 +953,13 @@ class StatementAnalyzer {
       this.role[j] = R_SKIP;
       j++;
     }
+    // ODBC outer join escape `{oj t1 LEFT JOIN t2 ON ...}` (MySQL, T-SQL): the
+    // tables inside are read like any other join.
+    if (j < limit && isOperator(t[j], '{')) {
+      this.role[j] = R_SKIP;
+      j++;
+      if (j < limit && isWord(t[j], 'OJ')) this.role[j++] = R_SKIP;
+    }
     if (j >= limit) return j;
     const tok = t[j];
     if (isPunct(tok, '(')) {
@@ -1345,6 +1358,19 @@ class StatementAnalyzer {
     }
   }
 
+  /**
+   * Uppercased name of the call whose last part is at `i`, with its qualifiers
+   * (`PG_CATALOG.PG_SLEEP`), so qualified block patterns such as `DBMS_*` match.
+   */
+  private callName(i: number): string {
+    const t = this.t;
+    let name = t[i].value.toUpperCase();
+    for (let k = i; k >= 2 && isPunct(t[k - 1], '.') && isName(t[k - 2]); k -= 2) {
+      name = `${t[k - 2].value.toUpperCase()}.${name}`;
+    }
+    return name;
+  }
+
   /** Function calls: a name followed by `(` that no earlier pass explained. */
   private functionPass(): void {
     const { t, role } = this;
@@ -1352,13 +1378,13 @@ class StatementAnalyzer {
       const tok = t[i];
       const r = role[i];
       if (r === R_FUNC) {
-        this.out.addFunction(tok.value.toUpperCase());
+        this.out.addFunction(this.callName(i));
         continue;
       }
       if (r !== R_NONE || (tok.type === 'word' && NON_FUNCTION.has(tok.value))) continue;
       if (isWord(tok, 'INSERT') && isWord(t[i - 1], 'THEN')) continue; // MERGE ... THEN INSERT (cols)
       role[i] = R_FUNC;
-      this.out.addFunction(tok.value.toUpperCase());
+      this.out.addFunction(this.callName(i));
       for (let k = i; k >= 2 && isPunct(t[k - 1], '.') && isName(t[k - 2]); k -= 2) {
         role[k - 1] = R_FUNC;
         role[k - 2] = R_FUNC;

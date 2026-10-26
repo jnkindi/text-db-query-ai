@@ -53,17 +53,19 @@ export interface Token {
 export type SqlLexErrorKind =
   | 'unterminated_string'
   | 'unterminated_quoted_identifier'
-  | 'unterminated_comment';
+  | 'unterminated_comment'
+  | 'executable_comment';
 
 /**
  * Thrown by `tokenize()` when a string, quoted identifier or block comment is
- * never closed.
+ * never closed, or (mysql and generic) on a MySQL executable comment
+ * (`/*! ... *\/`, `/*M! ... *\/`), whose body the server runs as code.
  */
 export class SqlLexError extends Error {
   readonly kind: SqlLexErrorKind;
   /** Offset of the start of the unterminated token (including any prefix such as `E` or `N`). */
   readonly position: number;
-  /** The opening delimiter: `'`, `"`, a backtick, `[`, `/*` or a dollar-quote tag such as `$fn$`. */
+  /** The opening delimiter: `'`, `"`, a backtick, `[`, `/*`, `/*!`, `/*M!` or a dollar-quote tag such as `$fn$`. */
   readonly delimiter: string;
 
   constructor(kind: SqlLexErrorKind, position: number, delimiter: string) {
@@ -73,7 +75,11 @@ export class SqlLexError extends Error {
         : kind === 'unterminated_quoted_identifier'
           ? 'quoted identifier'
           : 'block comment';
-    super(`Unterminated ${what} starting at position ${position}`);
+    super(
+      kind === 'executable_comment'
+        ? `MySQL executable comment starting at position ${position} is not allowed`
+        : `Unterminated ${what} starting at position ${position}`,
+    );
     this.name = 'SqlLexError';
     this.kind = kind;
     this.position = position;
@@ -96,6 +102,7 @@ const C_TAB = 9;
 const C_LF = 10;
 const C_CR = 13;
 const C_SPACE = 32;
+const C_BANG = 33;
 const C_DQUOTE = 34;
 const C_HASH = 35;
 const C_DOLLAR = 36;
@@ -206,6 +213,10 @@ export function tokenize(sql: string, dialect: SqlDialect = 'generic', options: 
   // `#` starts a comment in MySQL; generic follows MySQL so that nothing a
   // MySQL server would ignore is analyzed as code.
   const hashComment = isMysql || dialect === 'generic';
+  // MySQL needs whitespace or a control character after `--` (`1--1` is
+  // 1 - -1), and runs the body of `/*! ... */` as code. Generic follows MySQL
+  // here too, so it never skips text a MySQL server would run.
+  const mysqlComments = isMysql || dialect === 'generic';
   const nestedComments = isPg || isMssql;
   const backtickIdent = isMysql || isSqlite || dialect === 'generic';
   const bracketIdent = isMssql || isSqlite;
@@ -342,8 +353,12 @@ export function tokenize(sql: string, dialect: SqlDialect = 'generic', options: 
       continue;
     }
 
-    // Line comments: `--` everywhere, `#` in MySQL (and generic)
-    if ((c === C_MINUS && c1 === C_MINUS) || (c === C_HASH && hashComment)) {
+    // Line comments: `--` everywhere (MySQL: only before whitespace, a control
+    // character or the end), `#` in MySQL (and generic)
+    if (
+      (c === C_MINUS && c1 === C_MINUS && !(mysqlComments && i + 2 < n && sql.charCodeAt(i + 2) > C_SPACE)) ||
+      (c === C_HASH && hashComment)
+    ) {
       i += c === C_HASH ? 1 : 2;
       while (i < n) {
         const d = sql.charCodeAt(i);
@@ -354,8 +369,15 @@ export function tokenize(sql: string, dialect: SqlDialect = 'generic', options: 
       continue;
     }
 
-    // Block comments (nested in Postgres and T-SQL). MySQL `/*! ... */` is a comment token too.
+    // Block comments (nested in Postgres and T-SQL)
     if (c === C_SLASH && c1 === C_STAR) {
+      if (mysqlComments) {
+        const c2 = i + 2 < n ? sql.charCodeAt(i + 2) : -1;
+        if (c2 === C_BANG) throw new SqlLexError('executable_comment', start, '/*!');
+        if ((c2 | 0x20) === 109 /* m */ && i + 3 < n && sql.charCodeAt(i + 3) === C_BANG) {
+          throw new SqlLexError('executable_comment', start, '/*M!');
+        }
+      }
       if (nestedComments) {
         let depth = 1;
         let j = i + 2;
