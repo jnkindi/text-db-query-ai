@@ -40,6 +40,29 @@ export {
 
 export type { EasySetupConfig } from './helpers';
 
+// SQL analysis (the lexer the validator and identifier checks are built on)
+export {
+  analyzeSql,
+  tokenize,
+  toSqlDialect,
+  SqlLexError,
+  DEFAULT_BLOCKED_FUNCTIONS,
+  isBlockedFunction,
+  quoteIdentifier,
+} from './sql';
+
+export type {
+  SqlDialect,
+  Token,
+  TokenType,
+  LexOptions,
+  SqlLexErrorKind,
+  SqlAnalysis,
+  TableReference,
+  ColumnReference,
+  NestedStatement,
+} from './sql';
+
 // Types
 export {
   LLMProvider,
@@ -55,6 +78,13 @@ export {
   TextToQueryConfig,
   QueryResult,
   TextToQueryError,
+} from './types';
+
+export type {
+  OpenAIReasoningEffort,
+  ClaudeEffort,
+  QueryExample,
+  IdentifierCheckMode,
 } from './types';
 
 /**

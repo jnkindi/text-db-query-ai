@@ -1,16 +1,19 @@
 /**
- * Live smoke tests against the real APIs. Each provider's suite runs only when
- * its key is set (OPENAI_API_KEY, ANTHROPIC_API_KEY) and is skipped otherwise.
- * They make one small generation request per provider, which is billed.
+ * Live smoke tests against the real APIs. They run only with LIVE_LLM_TESTS=1,
+ * so keys exported in a shell never make `npm test` or a release build call a
+ * paid API. With the flag set, each provider's suite runs when its key is set
+ * (OPENAI_API_KEY, ANTHROPIC_API_KEY) and is skipped otherwise. They make one
+ * small generation request per provider, which is billed.
  *
- *   OPENAI_API_KEY=... ANTHROPIC_API_KEY=... npx jest tests/live
+ *   LIVE_LLM_TESTS=1 OPENAI_API_KEY=... ANTHROPIC_API_KEY=... npx jest tests/live
  */
 
 import { ClaudeProvider } from '../../src/providers/claude';
 import { OpenAIProvider } from '../../src/providers/openai';
 
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
+const LIVE = process.env.LIVE_LLM_TESTS === '1';
+const OPENAI_API_KEY = LIVE ? process.env.OPENAI_API_KEY : undefined;
+const ANTHROPIC_API_KEY = LIVE ? process.env.ANTHROPIC_API_KEY : undefined;
 
 const SYSTEM = [
   'You are a database query generator for PostgreSQL. Return only the SQL query, without explanations.',

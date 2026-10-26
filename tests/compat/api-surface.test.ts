@@ -32,7 +32,23 @@ const currentExports: AnyRecord = current;
  * 'Class.method'. Public and protected methods can never be listed here.
  * Add an entry only with a comment saying where the behavior went.
  */
-const ALLOWED_PRIVATE_REMOVALS: ReadonlySet<string> = new Set<string>([]);
+const ALLOWED_PRIVATE_REMOVALS: ReadonlySet<string> = new Set<string>([
+  // Both adapters now read the schema through introspectSchema() in
+  // src/adapters/introspection.ts: a fixed number of catalog queries per
+  // database (readPostgres/readMysql/readSqlite/readMssql) grouped in memory
+  // by buildTables(), instead of these per-table queries.
+  'DatabaseIntrospectionAdapter.getTableNames',
+  'DatabaseIntrospectionAdapter.getTableColumns',
+  'DatabaseIntrospectionAdapter.getForeignKeys',
+  'DatabaseIntrospectionAdapter.getPrimaryKey',
+  // Moved to the exported normalizeDataType() in introspection.ts, same mapping.
+  'DatabaseIntrospectionAdapter.normalizeDataType',
+  'PrismaAdapter.getTableNames',
+  'PrismaAdapter.getTableColumns',
+  'PrismaAdapter.getForeignKeys',
+  'PrismaAdapter.getPrimaryKey',
+  'PrismaAdapter.normalizeDataType',
+]);
 
 const CLASS_SOURCE = /^class\b/;
 const DTS_CLASS = /^export declare (?:abstract )?class (\w+)/;
