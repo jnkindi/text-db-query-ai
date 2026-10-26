@@ -175,10 +175,10 @@ describe('cost', () => {
     );
     const build = (n: number) =>
       'SELECT * FROM t WHERE ' + Array.from({ length: n }, (_, i) => `(a = ${i} OR b IN (SELECT c FROM u${i % 7} x${i}))`).join(' AND ');
-    // Best of three runs, to keep scheduling noise out of the ratio
+    // Best of five runs, to keep scheduling noise out of the ratio
     const time = async (sql: string) => {
       let best = Infinity;
-      for (let r = 0; r < 3; r++) {
+      for (let r = 0; r < 5; r++) {
         const t0 = process.hrtime.bigint();
         await v.validate(sql);
         v.addRowLevelSecurity(sql, { userId: 1, role: 'u' });

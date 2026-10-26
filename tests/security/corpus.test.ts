@@ -28,9 +28,14 @@ const ALL_OPERATIONS: QueryOperation[] = ['SELECT', 'INSERT', 'UPDATE', 'DELETE'
  *   rejected it the same way: "Could not determine query operation");
  * - a MySQL string with `\'` ends somewhere else under NO_BACKSLASH_ESCAPES,
  *   where this one turns into a second statement (0.0.1 rejected it too, for
- *   the word DROP).
+ *   the word DROP);
+ * - TOP n PERCENT returns a share of the table, which maxRowLimit cannot cap.
  */
-const REJECTED_BY_DESIGN = new Set(["VALUES (1, 'a'), (2, 'b')", "SELECT 'it\\'s; DROP TABLE x' AS s"]);
+const REJECTED_BY_DESIGN = new Set([
+  "VALUES (1, 'a'), (2, 'b')",
+  "SELECT 'it\\'s; DROP TABLE x' AS s",
+  'SELECT TOP 10 PERCENT id FROM orders ORDER BY total DESC',
+]);
 
 function validator(dialect: SecurityDialect, config: SecurityConfig = {}): SecurityValidator {
   const options = dialect === 'generic' ? {} : { databaseType: dialect as DatabaseType };

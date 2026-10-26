@@ -47,6 +47,8 @@ const GENERIC_HASH = 'In the generic dialect (no databaseType) "#" starts a MySQ
 const GENERIC_DOLLAR = 'In the generic dialect "$...$" is a Postgres dollar-quoted string to the database but code to the validator, so it is rejected; set databaseType.';
 const MYSQL_HASH = 'MySQL "#" comments in a query given straight to validate() are reported like "--" and "/*" (the sanitizer removes them in the generator).';
 const LIMIT_COUNT = 'The row limit is read per dialect: MySQL LIMIT offset, count; TOP n; FETCH FIRST n ROWS; LIMIT -1 (unlimited in SQLite); hex and exponent counts. 0.0.1 read only the first digits after LIMIT.';
+const LIMIT_EXPRESSION = 'A row count that is not a plain number (an expression, a subquery, TOP/FETCH ... PERCENT) can be neither checked against maxRowLimit nor lowered, so it is rejected. LIMIT ALL and a lone parameter still only warn.';
+const TABLE_QUALIFIER = 'An allowedTables entry matches a reference with the same qualification only: "orders" does not allow shop.orders or otherdb..orders (another schema or database can hold a different table of that name), and "billing.invoices" does not allow a bare invoices.';
 const TABLES = 'allowedTables now sees quoted, backticked, bracketed, schema-qualified and comma-listed tables (0.0.1 missed them, so they bypassed the allowlist).';
 
 /**
@@ -152,6 +154,8 @@ const DANGEROUS_NOW_REJECTED: ReadonlyArray<[string, string]> = [
   ['SELECT * FROM t LIMIT 0x7fffffff', LIMIT_COUNT],
 
   ['SELECT "u"."id" FROM "public"."User" AS "u" LIMIT 5', TABLES],
+  ['SELECT `o`.`id` FROM `shop`.`orders` AS `o` LIMIT 5', TABLE_QUALIFIER],
+  ['SELECT TOP 10 PERCENT id FROM orders ORDER BY total DESC', LIMIT_EXPRESSION],
   ['SELECT * FROM `admin_secrets` LIMIT 10', TABLES],
   ['SELECT * FROM "admin_secrets" LIMIT 10', TABLES],
   ['SELECT * FROM users, admin_secrets LIMIT 10', TABLES],

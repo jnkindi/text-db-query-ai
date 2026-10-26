@@ -13,6 +13,9 @@ import {
   toSqlDialect,
   significantTokens,
   isBlockedFunction,
+  needsQuoting,
+  quoteIdentifier,
+  sqlReadings,
   SqlLexError,
   type LexOptions,
   type SqlAnalysis,
@@ -134,8 +137,6 @@ interface Rules {
   sensitiveOrder: string[];
   /** Lowercased allowedTables entries, or null when every table is allowed. */
   allowedTables: Set<string> | null;
-  /** Lowercased last part of each qualified allowedTables entry. */
-  allowedTableNames: Set<string>;
   /** Lowercased table name -> schema tables with that name. */
   schemaTables: Map<string, TableSchema[]>;
 }
@@ -179,7 +180,12 @@ interface RlsState {
   value: string;
   valueType: 'number' | 'string';
   edits: TextEdit[];
+  /** Token indexes of tables a WHERE filter covers; every other user table is wrapped. */
+  handled: Set<number>;
 }
+
+/** Alias of the table inside the filtered derived table that replaces a user table. */
+const RLS_ALIAS = '__rls';
 
 const EMPTY_COLUMNS = { restricted: [] as string[], sensitive: [] as string[] };
 
@@ -187,6 +193,12 @@ const eqi = (a: string | undefined, b: string | undefined): boolean =>
   a !== undefined && b !== undefined && a.toUpperCase() === b.toUpperCase();
 
 /** End offsets of the strings, quoted identifiers and comments of a token list. */
+/** `?`, `$1` or `(@n)` alone as a row count. */
+function isLoneParam(t: Token[], i: number): boolean {
+  if (isPunctAt(t, i, '(')) return t[i + 1]?.type === 'param' && isPunctAt(t, i + 2, ')');
+  return t[i]?.type === 'param' && t[i + 1]?.type !== 'operator';
+}
+
 function literalEnds(tokens: Token[]): number[] {
   const out: number[] = [];
   for (const tok of tokens) {
@@ -403,6 +415,8 @@ export class SecurityValidator {
   private readonly dialect: SqlDialect;
   private readonly rules: Rules;
   private rlsColumnCache?: RlsColumn;
+  /** Generic dialect only: one validator per database the query may run on (built on first use). */
+  private readingValidators?: SecurityValidator[];
 
   constructor(config: SecurityConfig = {}, options: SecurityValidatorOptions = {}) {
     this.options = options;
@@ -505,6 +519,17 @@ export class SecurityValidator {
       this.checkRowLimit(ctx, errors, warnings);
     }
 
+    // Without a database type the query may run on any database, so it must also
+    // pass as each one reads it: T-SQL [a'] identifiers, for one, hide code from
+    // the generic reading. Only consulted when the generic checks pass, so the
+    // messages of a rejected query do not change.
+    if (this.dialect === 'generic' && errors.length === 0) {
+      for (const v of this.databaseValidators()) {
+        const r = await v.validate(query, userContext);
+        for (const e of r.errors) if (!errors.includes(e)) errors.push(e);
+      }
+    }
+
     // Run custom validator if provided
     if (this.config.customValidator) {
       try {
@@ -525,6 +550,23 @@ export class SecurityValidator {
       errors,
       warnings,
     };
+  }
+
+  /**
+   * Validators with this configuration for every database in sqlReadings('generic')
+   * (the mysql one compares both backslash modes itself). They skip the user
+   * context requirement and customValidator, which validate() handles once.
+   */
+  private databaseValidators(): SecurityValidator[] {
+    if (!this.readingValidators) {
+      const { customValidator: _custom, ...config } = this.config;
+      const dialects = [...new Set(sqlReadings('generic').map((r) => r.dialect))];
+      this.readingValidators = dialects.map(
+        (databaseType) =>
+          new SecurityValidator({ ...config, requireUserContext: false }, { ...this.options, databaseType })
+      );
+    }
+    return this.readingValidators;
   }
 
   /**
@@ -557,28 +599,37 @@ export class SecurityValidator {
       throw error;
     }
 
-    // Only apply to SELECT, UPDATE, DELETE
+    // SELECT, UPDATE and DELETE get a WHERE filter; INSERT only when it reads tables (INSERT ... SELECT)
     const operation = analysis.operation;
-    if (operation !== 'SELECT' && operation !== 'UPDATE' && operation !== 'DELETE') {
+    if (operation !== 'SELECT' && operation !== 'UPDATE' && operation !== 'DELETE' && operation !== 'INSERT') {
       return query;
     }
     const shape = shapeOf(analysis.statements[0]);
     if (!shape.balanced) return query;
+    const located = locateTables(shape, analysis.tables);
+    let insertTarget = -1;
+    if (operation === 'INSERT') {
+      const main = mainIndex(shape);
+      const target = located.find((l) => l.index > main);
+      insertTarget = target ? target.index : -1;
+      if (located.every((l) => l.index === insertTarget)) return query;
+    }
 
     const column = this.rlsColumn();
     const userId: unknown = userContext.userId;
     const state: RlsState = {
       sql: query,
       shape,
-      tables: locateTables(shape, analysis.tables),
+      tables: located,
       column,
       value: this.rlsValue(userId),
       valueType: typeof userId === 'string' ? 'string' : 'number',
       edits: [],
+      handled: new Set(insertTarget >= 0 ? [insertTarget] : []),
     };
 
     const t = shape.t;
-    const work: Array<[number, number]> = [[0, t.length]];
+    const work: Array<[number, number]> = operation === 'INSERT' ? [] : [[0, t.length]];
     while (work.length > 0) {
       const [start, end] = work.pop()!;
       let j = start;
@@ -604,6 +655,7 @@ export class SecurityValidator {
         // VALUES branches hold no rows of any table
       }
     }
+    this.wrapUserTables(state);
     return applyEdits(query, state.edits);
   }
 
@@ -938,8 +990,9 @@ export class SecurityValidator {
 
   /**
    * Extract the tables the query accesses that allowedTables does not list.
-   * Matching is case-insensitive; `schema.table` matches an entry for either
-   * `schema.table` or `table`. CTE names are not tables.
+   * Matching is case-insensitive and exact in qualification: `schema.table`
+   * matches only a `schema.table` entry and `table` only a `table` entry.
+   * CTE names are not tables.
    */
   private extractTableNames(ctx: QueryContext): string[] {
     const allowed = this.rules.allowedTables;
@@ -947,17 +1000,17 @@ export class SecurityValidator {
     const out: string[] = [];
     const seen = new Set<string>();
     for (const ref of ctx.analysis.tables) {
-      const name = ref.name.toLowerCase();
-      const qualified = ref.schema !== undefined ? `${ref.schema.toLowerCase()}.${name}` : undefined;
-      const full = ref.catalog !== undefined && qualified !== undefined ? `${ref.catalog.toLowerCase()}.${qualified}` : undefined;
-      const ok =
-        allowed.has(name) ||
-        (qualified !== undefined && allowed.has(qualified)) ||
-        (full !== undefined && allowed.has(full)) ||
-        (ref.schema === undefined && this.rules.allowedTableNames.has(name));
-      if (ok) continue;
-      const display = ref.schema !== undefined ? `${ref.schema}.${ref.name}` : ref.name;
+      // An entry matches a reference written with the same qualification only:
+      // `users` is whatever the connection resolves the bare name to, and
+      // `tenant_b.users` or `otherdb..users` is a different table.
+      const display =
+        ref.catalog !== undefined
+          ? `${ref.catalog}.${ref.schema ?? ''}.${ref.name}`
+          : ref.schema !== undefined
+            ? `${ref.schema}.${ref.name}`
+            : ref.name;
       const key = display.toLowerCase();
+      if (allowed.has(key)) continue;
       if (seen.has(key)) continue;
       seen.add(key);
       out.push(display);
@@ -969,7 +1022,21 @@ export class SecurityValidator {
   private checkRowLimit(ctx: QueryContext, errors: string[], warnings: string[]): void {
     const shape = ctx.shapes[0];
     const max = this.config.maxRowLimit;
-    const counts = findRowLimits(shape, this.dialect).filter((l) => l.value !== null);
+    const limits = findRowLimits(shape, this.dialect);
+    if (typeof max === 'number') {
+      // A count that is not a plain number (an expression, a subquery, PERCENT) can be
+      // neither checked nor lowered, so it is refused. LIMIT ALL is the same as no limit
+      // (enforceLimit replaces it), and a lone parameter is bound by the application, not
+      // the model: both only warn, as in 0.0.1.
+      let refused = false;
+      for (const l of limits) {
+        if (l.value !== null || l.all || isLoneParam(shape.t, l.valueStart)) continue;
+        errors.push(`${shape.t[l.keyword].value} value must be a plain number no greater than ${max}`);
+        refused = true;
+      }
+      if (refused) return;
+    }
+    const counts = limits.filter((l) => l.value !== null);
     if (counts.length === 0) {
       warnings.push(
         `Query does not have a LIMIT clause. Maximum ${this.config.maxRowLimit} rows will be enforced.`
@@ -1097,18 +1164,15 @@ export class SecurityValidator {
     }
 
     let allowedTables: Set<string> | null = null;
-    const allowedTableNames = new Set<string>();
     if (this.config.allowedTables && this.config.allowedTables.length > 0) {
       allowedTables = new Set();
       for (const entry of this.config.allowedTables) {
         const e = String(entry).trim().toLowerCase();
         allowedTables.add(e);
-        const dot = e.lastIndexOf('.');
-        if (dot >= 0) allowedTableNames.add(e.slice(dot + 1));
       }
     }
 
-    return { restrictedBare, byColumn, restrictedOrder, sensitiveOrder, allowedTables, allowedTableNames, schemaTables };
+    return { restrictedBare, byColumn, restrictedOrder, sensitiveOrder, allowedTables, schemaTables };
   }
 
   /** The configured RLS column as a single identifier token. */
@@ -1184,7 +1248,10 @@ export class SecurityValidator {
     }
 
     const chosen = this.rlsTarget(st, bs, be, d, head === 'SELECT' && from >= 0 ? from : -1, where >= 0 ? where : boundary);
+    if (chosen) for (const l of chosen.covered) st.handled.add(l.index);
     const qualifier = chosen && chosen.qualify ? `${this.tableText(st, chosen.table)}.` : '';
+    // An existing `t.col = v` only covers its own table, not an unqualified filter's whole level
+    const sameAs = chosen && (chosen.qualify || chosen.covered.length === 1) ? chosen.table : undefined;
     const filter = `${qualifier}${st.column.text} = ${st.value}`;
 
     if (where < 0) {
@@ -1247,7 +1314,13 @@ export class SecurityValidator {
     // malformed condition (dangling BETWEEN, unclosed CASE) stays malformed.
     const pure = !orLike && !broken && caseDepth === 0 && betweens === 0;
 
-    if (pure && conjuncts.some(([a, b]) => this.isSameFilter(st, a, b, chosen?.table))) return;
+    if (pure && chosen && chosen.qualify) {
+      // `x.col = v` in a pure AND-chain already filters table x of this branch
+      for (const l of chosen.direct) {
+        if (l !== chosen.table && conjuncts.some(([a, b]) => this.isSameFilter(st, a, b, l))) st.handled.add(l.index);
+      }
+    }
+    if (pure && conjuncts.some(([a, b]) => this.isSameFilter(st, a, b, sameAs))) return;
 
     const end = t[condEnd - 1].end;
     if (pure) {
@@ -1266,14 +1339,20 @@ export class SecurityValidator {
     if (!isNameToken(t[k])) return;
     while (k + 2 < be && isPunctAt(t, k + 1, '.') && isNameToken(t[k + 2])) k += 2;
     const filter = `${st.column.text} = ${st.value}`;
+    st.handled.add(bs + 1);
     st.edits.push({ start: t[bs].start, end: t[bs].end, text: 'SELECT * FROM' });
     st.edits.push({ start: t[k].end, end: t[k].end, text: ` WHERE ${filter}` });
   }
 
   /**
-   * The table the filter belongs to, and whether it must be qualified: with
-   * more than one table (or a join) in the branch, the first table that has
-   * the column according to the schema, else the first table.
+   * The table the filter belongs to, whether it must be qualified, and the
+   * tables of the branch it covers. With more than one table (or a join) in
+   * the branch: the first table that has the column according to the schema,
+   * else the first table. Without a schema, a branch with several tables keeps
+   * the unqualified 0.0.1 filter: it filters the one table that has the column,
+   * and makes the query fail as ambiguous when several have it. A table whose
+   * alias renames its columns is never covered that way (the name would bind
+   * elsewhere), so it gets wrapped instead.
    */
   private rlsTarget(
     st: RlsState,
@@ -1282,7 +1361,7 @@ export class SecurityValidator {
     d: number,
     from: number,
     fromEnd: number
-  ): { table: LocatedTable; qualify: boolean } | undefined {
+  ): { table: LocatedTable; qualify: boolean; covered: LocatedTable[]; direct: LocatedTable[] } | undefined {
     const { shape } = st;
     // Tables of this branch's own query level (parenthesized joins included, subqueries not)
     const scope = queryScopes(shape);
@@ -1299,6 +1378,9 @@ export class SecurityValidator {
       if (scope[st.tables[k].index] === level) direct.push(st.tables[k]);
     }
     if (direct.length === 0) return undefined;
+    if (direct.length > 1 && this.rules.schemaTables.size === 0) {
+      return { table: direct[0], qualify: false, covered: direct.filter((l) => !l.renamesColumns), direct };
+    }
     let qualify = direct.length > 1;
     if (!qualify && from >= 0) {
       const t = shape.t;
@@ -1314,7 +1396,65 @@ export class SecurityValidator {
     const withColumn = qualify
       ? direct.find((l) => this.schemaTablesFor(l.ref).some((tb) => tb.columns.some((c) => c.name.toUpperCase() === column)))
       : undefined;
-    return { table: withColumn ?? direct[0], qualify };
+    const table = withColumn ?? direct[0];
+    return { table, qualify, covered: [table], direct };
+  }
+
+  /**
+   * Replace every table that holds user rows and that no WHERE filter covers
+   * (subqueries, CTE bodies, derived tables, further joined tables, the source
+   * of INSERT ... SELECT) with a filtered derived table:
+   * `orders o` -> `(SELECT id, ... FROM orders AS __rls WHERE __rls.user_id = 5) o`.
+   * The filter is bound to the table itself, so it cannot resolve to an outer
+   * query's column, and outer joins keep their meaning.
+   */
+  private wrapUserTables(st: RlsState): void {
+    const t = st.shape.t;
+    for (const l of st.tables) {
+      if (st.handled.has(l.index) || !this.holdsUserRows(l.ref, st.column)) continue;
+      const ref = l.ref;
+      let last = l.index;
+      while (last + 1 < t.length && t[last + 1].end <= ref.end) last++;
+      const alias = ref.alias !== undefined ? '' : ` ${t[last].text}`;
+      const name = st.sql.slice(ref.start, ref.end);
+      st.edits.push({
+        start: ref.start,
+        end: ref.end,
+        text: `(SELECT ${this.wrapColumns(ref)} FROM ${name} AS ${RLS_ALIAS} WHERE ${RLS_ALIAS}.${st.column.text} = ${st.value})${alias}`,
+      });
+    }
+  }
+
+  /**
+   * Whether row-level security applies to the table: it has the column in the
+   * schema. Without a schema, or for a table the schema does not list, every
+   * table is assumed to hold user rows (the query then fails rather than leaks).
+   */
+  private holdsUserRows(ref: TableReference, column: RlsColumn): boolean {
+    if (this.rules.schemaTables.size === 0) return true;
+    const tables = this.schemaTablesFor(ref);
+    if (tables.length === 0) return true;
+    const name = column.name.toUpperCase();
+    return tables.some((tb) => (tb.columns ?? []).some((c) => c.name.toUpperCase() === name));
+  }
+
+  /**
+   * Select list of a wrapped table: its schema columns without restricted or
+   * sensitive ones, so validating the rewritten query does not see them through
+   * a `*`. `*` when the schema does not pin down one table.
+   */
+  private wrapColumns(ref: TableReference): string {
+    const tables = this.schemaTablesFor(ref);
+    if (tables.length !== 1) return '*';
+    const columns = (tables[0].columns ?? [])
+      .map((c) => c.name)
+      .filter((name) => {
+        const key = name.toUpperCase();
+        if (this.rules.restrictedBare.has(key)) return false;
+        return !(this.rules.byColumn.get(key) ?? []).some((rule) => this.tableMatches(rule, ref));
+      });
+    if (columns.length === 0) return '*';
+    return columns.map((name) => (needsQuoting(name, this.dialect) ? quoteIdentifier(name, this.dialect) : name)).join(', ');
   }
 
   /** How the query names a table: its alias as written, else its (qualified) name as written. */

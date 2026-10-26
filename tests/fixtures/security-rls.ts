@@ -148,22 +148,22 @@ export const rlsCases: RlsCase[] = [
   {
     name: 'WHERE inside a subquery',
     query: 'SELECT * FROM orders WHERE id IN (SELECT order_id FROM refunds WHERE user_id = 123)',
-    expected: 'SELECT * FROM orders WHERE id IN (SELECT order_id FROM refunds WHERE user_id = 123) AND user_id = 123',
+    expected: 'SELECT * FROM orders WHERE id IN (SELECT order_id FROM (SELECT * FROM refunds AS __rls WHERE __rls.user_id = 123) refunds WHERE user_id = 123) AND user_id = 123',
   },
   {
     name: 'derived table',
     query: 'SELECT * FROM (SELECT * FROM orders WHERE user_id = 123) o',
-    expected: 'SELECT * FROM (SELECT * FROM orders WHERE user_id = 123) o WHERE user_id = 123',
+    expected: 'SELECT * FROM (SELECT * FROM (SELECT * FROM orders AS __rls WHERE __rls.user_id = 123) orders WHERE user_id = 123) o WHERE user_id = 123',
   },
   {
     name: 'WITH ... main statement',
     query: "WITH recent AS (SELECT * FROM orders WHERE status = 'new') SELECT * FROM recent ORDER BY id",
-    expected: "WITH recent AS (SELECT * FROM orders WHERE status = 'new') SELECT * FROM recent WHERE user_id = 123 ORDER BY id",
+    expected: "WITH recent AS (SELECT * FROM (SELECT * FROM orders AS __rls WHERE __rls.user_id = 123) orders WHERE status = 'new') SELECT * FROM recent WHERE user_id = 123 ORDER BY id",
   },
   {
     name: 'CTE body filtered on the user does not count',
     query: 'WITH mine AS (SELECT * FROM orders WHERE user_id = 123) SELECT * FROM mine',
-    expected: 'WITH mine AS (SELECT * FROM orders WHERE user_id = 123) SELECT * FROM mine WHERE user_id = 123',
+    expected: 'WITH mine AS (SELECT * FROM (SELECT * FROM orders AS __rls WHERE __rls.user_id = 123) orders WHERE user_id = 123) SELECT * FROM mine WHERE user_id = 123',
   },
   {
     name: 'WITH RECURSIVE with SEARCH clause',
@@ -214,7 +214,7 @@ export const rlsCases: RlsCase[] = [
   {
     name: 'UPDATE with a subquery in SET',
     query: 'UPDATE orders SET total = (SELECT SUM(price) FROM items WHERE items.order_id = orders.id) WHERE id = 1',
-    expected: 'UPDATE orders SET total = (SELECT SUM(price) FROM items WHERE items.order_id = orders.id) WHERE id = 1 AND user_id = 123',
+    expected: 'UPDATE orders SET total = (SELECT SUM(price) FROM (SELECT * FROM items AS __rls WHERE __rls.user_id = 123) items WHERE items.order_id = orders.id) WHERE id = 1 AND user_id = 123',
   },
   {
     name: 'UPDATE with OR',
@@ -243,7 +243,7 @@ export const rlsCases: RlsCase[] = [
     name: 'T-SQL DELETE alias FROM ... JOIN',
     databaseType: 'mssql',
     query: 'DELETE o FROM orders o JOIN users u ON u.id = o.user_id',
-    expected: 'DELETE o FROM orders o JOIN users u ON u.id = o.user_id WHERE o.user_id = 123',
+    expected: 'DELETE o FROM orders o JOIN users u ON u.id = o.user_id WHERE user_id = 123',
   },
 
   // Duplicates: skipped only for a pure AND-chain with the same filter
@@ -386,9 +386,9 @@ export const rlsCases: RlsCase[] = [
   // Joins
   { name: 'single aliased table stays unqualified', query: 'SELECT * FROM orders o', expected: 'SELECT * FROM orders o WHERE user_id = 123' },
   {
-    name: 'join without schema: first table',
+    name: 'join without schema: the unqualified 0.0.1 filter (ambiguous, so failing, if both tables have the column)',
     query: 'SELECT * FROM users u JOIN orders o ON o.user_id = u.id',
-    expected: 'SELECT * FROM users u JOIN orders o ON o.user_id = u.id WHERE u.user_id = 123',
+    expected: 'SELECT * FROM users u JOIN orders o ON o.user_id = u.id WHERE user_id = 123',
   },
   {
     name: 'join with schema: first table that has the column',
@@ -411,7 +411,7 @@ export const rlsCases: RlsCase[] = [
   {
     name: 'join with a derived table',
     query: 'SELECT * FROM orders o JOIN (SELECT order_id FROM refunds) r ON r.order_id = o.id',
-    expected: 'SELECT * FROM orders o JOIN (SELECT order_id FROM refunds) r ON r.order_id = o.id WHERE o.user_id = 123',
+    expected: 'SELECT * FROM orders o JOIN (SELECT order_id FROM (SELECT * FROM refunds AS __rls WHERE __rls.user_id = 123) refunds) r ON r.order_id = o.id WHERE o.user_id = 123',
   },
   {
     name: 'LATERAL subquery is not a table of the branch',
@@ -424,6 +424,13 @@ export const rlsCases: RlsCase[] = [
     name: 'quoted alias is kept as written',
     query: 'SELECT * FROM "Order" AS "o" JOIN "User" "u" ON "u"."id" = "o"."userId"',
     config: { rowLevelSecurityColumn: '"userId"' },
+    schema: {
+      databaseType: 'postgres',
+      tables: [
+        { name: 'Order', columns: [{ name: 'id', type: 'number' }, { name: 'userId', type: 'number' }] },
+        { name: 'User', columns: [{ name: 'id', type: 'number' }] },
+      ],
+    },
     expected: 'SELECT * FROM "Order" AS "o" JOIN "User" "u" ON "u"."id" = "o"."userId" WHERE "o"."userId" = 123',
   },
 

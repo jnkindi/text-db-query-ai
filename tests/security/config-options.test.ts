@@ -88,7 +88,6 @@ describe('allowedTables', () => {
     for (const sql of [
       'SELECT * FROM users LIMIT 1',
       'SELECT * FROM "Users" LIMIT 1',
-      'SELECT * FROM public.users LIMIT 1',
       'SELECT * FROM billing.invoices LIMIT 1',
       'SELECT * FROM users u JOIN orders o ON o.user_id = u.id LIMIT 1',
       'WITH secrets AS (SELECT id FROM users) SELECT * FROM secrets LIMIT 1',
@@ -106,6 +105,16 @@ describe('allowedTables', () => {
       ['SELECT * FROM users, admin_secrets', 'admin_secrets'],
       ['SELECT * FROM users WHERE id IN (SELECT id FROM admin_secrets)', 'admin_secrets'],
       ['SELECT * FROM other.invoices', 'other.invoices'],
+      // An unqualified entry is the table the connection resolves the name to; another
+      // schema or database with a table of that name is a different table.
+      ['SELECT * FROM public.users', 'public.users'],
+      ['SELECT * FROM tenant_b.users', 'tenant_b.users'],
+      ['SELECT * FROM otherdb.users', 'otherdb.users', 'mysql'],
+      ['SELECT * FROM otherdb..users', 'otherdb..users', 'mssql'],
+      ['SELECT * FROM otherdb.dbo.users', 'otherdb.dbo.users', 'mssql'],
+      // A qualified entry allows that schema only, not the bare name (it may resolve elsewhere).
+      ['SELECT * FROM invoices', 'invoices'],
+      ['SELECT * FROM other.billing.invoices', 'other.billing.invoices', 'mssql'],
       ['SELECT * FROM users JOIN information_schema.columns c ON 1=1', 'information_schema.columns'],
     ];
     for (const [sql, table, databaseType] of cases) {
@@ -224,6 +233,37 @@ describe('maxRowLimit', () => {
       'Query does not have a LIMIT clause. Maximum 100 rows will be enforced.',
     ]);
     expect((await check('SELECT * FROM t LIMIT 5', cfg)).warnings).toEqual([]);
+  });
+
+  it('refuses a count that is not a plain number, since it cannot be checked or lowered', async () => {
+    const cfg: SecurityConfig = { maxRowLimit: 100 };
+    const cases: Array<[string, string, string?]> = [
+      ['SELECT * FROM t LIMIT (SELECT 1000000)', 'LIMIT'],
+      ['SELECT * FROM t LIMIT 2 * 100000', 'LIMIT'],
+      ['SELECT * FROM t LIMIT 10, 2 * 1000', 'LIMIT', 'mysql'],
+      ['SELECT * FROM t FETCH FIRST 2 * 1000 ROWS ONLY', 'FETCH'],
+      ['SELECT * FROM t FETCH FIRST 50 PERCENT ROWS ONLY', 'FETCH'],
+      ['SELECT TOP 100 PERCENT * FROM t', 'TOP', 'mssql'],
+      ['SELECT TOP (2 * 1000) * FROM t', 'TOP', 'mssql'],
+    ];
+    for (const [sql, keyword, databaseType] of cases) {
+      const r = await check(sql, cfg, { databaseType: databaseType as any });
+      expect(r.errors).toEqual([`${keyword} value must be a plain number no greater than 100`]);
+    }
+  });
+
+  it('only warns for a lone parameter, which the application binds (as in 0.0.1)', async () => {
+    const cfg: SecurityConfig = { maxRowLimit: 100 };
+    for (const [sql, databaseType] of [
+      ['SELECT * FROM t LIMIT ?', 'mysql'],
+      ['SELECT * FROM t LIMIT $1', 'postgres'],
+      ['SELECT * FROM t LIMIT ?, ?', 'mysql'],
+      ['SELECT TOP (@n) * FROM t', 'mssql'],
+    ] as const) {
+      const r = await check(sql, cfg, { databaseType });
+      expect(r.errors).toEqual([]);
+      expect(r.warnings).toEqual(['Query does not have a LIMIT clause. Maximum 100 rows will be enforced.']);
+    }
   });
 
   it('defaults to 1000', async () => {
