@@ -88,6 +88,8 @@ export interface RowLimit {
   value: number | null;
   /** `LIMIT ALL`, which does not limit anything. */
   all: boolean;
+  /** Index of the WITH of a following `WITH TIES` (FETCH ... ROWS WITH TIES, TOP n WITH TIES), or -1. */
+  ties?: number;
 }
 
 /** @internal */
@@ -338,6 +340,15 @@ function hasSetOperatorUpTo(s: Shape, maxDepth: number): boolean {
  * and (mssql, generic) TOP on the main SELECT when no set operator follows it.
  * @internal
  */
+/** Index of the WITH of `WITH TIES` right after the row count of `l` (past ROW/ROWS, PERCENT, `)`), or -1. */
+function tiesAfter(t: Token[], l: RowLimit): number {
+  for (let k = Math.max(l.valueEnd, l.keyword + 1), steps = 0; k < t.length && steps < 4; k++, steps++) {
+    if (isWordAt(t, k, 'WITH') && isWordAt(t, k + 1, 'TIES')) return k;
+    if (!(isWordAt(t, k, 'ROW') || isWordAt(t, k, 'ROWS') || isWordAt(t, k, 'PERCENT') || isPunctAt(t, k, ')'))) break;
+  }
+  return -1;
+}
+
 export function findRowLimits(s: Shape, dialect: SqlDialect): RowLimit[] {
   const { t, depth } = s;
   const out: RowLimit[] = [];
@@ -410,6 +421,7 @@ export function findRowLimits(s: Shape, dialect: SqlDialect): RowLimit[] {
       }
     }
   }
+  for (const l of out) l.ties = tiesAfter(t, l);
   return out;
 }
 
@@ -690,6 +702,12 @@ export class QuerySanitizer {
       }
     } else if (lower) {
       for (const l of limits) {
+        // WITH TIES can return any number of rows past the count: FETCH ... ONLY, or plain TOP n
+        if (l.ties !== undefined && l.ties >= 0) {
+          const w = l.ties;
+          if (isWordAt(t, l.keyword, 'FETCH')) edits.push({ start: t[w].start, end: t[w + 1].end, text: 'ONLY' });
+          else edits.push({ start: t[w - 1].end, end: t[w + 1].end, text: '' });
+        }
         if (l.valueEnd <= l.valueStart) continue;
         if (l.all || (l.value !== null && (l.value > limit || l.value < 0))) {
           edits.push({ start: t[l.valueStart].start, end: t[l.valueEnd - 1].end, text: n });

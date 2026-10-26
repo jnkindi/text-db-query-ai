@@ -224,7 +224,6 @@ describe('T-SQL queries stacked without ";"', () => {
     'INSERT INTO t (a, b) SELECT a, b FROM u',
     'INSERT t SELECT a FROM u',
     'SELECT id FROM orders WITH (NOLOCK) WHERE id IN (SELECT id FROM t)',
-    'SELECT TOP 5 WITH TIES id FROM orders ORDER BY total',
     'SELECT id, (SELECT MAX(total) FROM orders) AS m FROM t WHERE EXISTS (SELECT 1 FROM u)',
     'SELECT TOP 5 (SELECT 1) AS a FROM t',
     'SELECT a, (SELECT 1) AS b, CASE WHEN (SELECT 1) = 1 THEN 1 END AS c FROM t',
@@ -233,7 +232,6 @@ describe('T-SQL queries stacked without ";"', () => {
     'UPDATE t SET a = (SELECT MAX(b) FROM u) WHERE id IN (SELECT id FROM u)',
     'INSERT INTO t VALUES (1), ((SELECT 2))',
     'SELECT o.id, x.n FROM orders o CROSS APPLY (SELECT COUNT(*) AS n FROM t) x OUTER APPLY (SELECT 1 AS m) y',
-    'SELECT TOP 5 WITH TIES (SELECT 1) AS a FROM t ORDER BY a',
   ];
 
   it.each(['mssql', undefined] as const)('rejects them (%s)', async (databaseType) => {
@@ -250,6 +248,12 @@ describe('T-SQL queries stacked without ";"', () => {
     for (const sql of fine) {
       expect({ sql, errors: (await v.validate(sql)).errors }).toEqual({ sql, errors: [] });
     }
+  });
+
+  it('reads a query group after TOP n WITH TIES as part of the statement', async () => {
+    const v = new SecurityValidator({ requireUserContext: false }, { databaseType: 'mssql' });
+    const { errors } = await v.validate('SELECT TOP 5 WITH TIES (SELECT 1) AS a FROM t ORDER BY a');
+    expect(errors).not.toContain('Query contains dangerous patterns: Multiple statements detected');
   });
 
   it('accepts the Postgres forms with databaseType postgres; without a type they could be two T-SQL statements', async () => {

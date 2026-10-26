@@ -1179,8 +1179,14 @@ export class SecurityValidator {
       // the model: both only warn, as in 0.0.1.
       let refused = false;
       for (const l of limits) {
+        const keyword = shape.t[l.keyword].value;
+        if (l.ties !== undefined && l.ties >= 0) {
+          errors.push(`${keyword} ... WITH TIES can return more than ${max} rows`);
+          refused = true;
+          continue;
+        }
         if (l.value !== null || l.all || isLoneParam(shape.t, l.valueStart)) continue;
-        errors.push(`${shape.t[l.keyword].value} value must be a plain number no greater than ${max}`);
+        errors.push(`${keyword} value must be a plain number no greater than ${max}`);
         refused = true;
       }
       if (refused) return;

@@ -109,6 +109,7 @@ Each line is one reason, with examples. All of them are dangerous or malformed; 
 - MySQL `#` comments in a query given straight to `validate()` are reported like `--` and `/*` (the sanitizer removes them in the generator).
 - The row limit is read per dialect: MySQL `LIMIT offset, count`; `TOP n`; `FETCH FIRST n ROWS`; `LIMIT -1` (unlimited in SQLite); hex and exponent counts. 0.0.1 read only the first digits after `LIMIT`.
 - A row count that is not a plain number (an expression, a subquery, `TOP`/`FETCH ... PERCENT`) can be neither checked against `maxRowLimit` nor lowered, so it is rejected. `LIMIT ALL` and a lone parameter still only warn.
+- `FETCH ... WITH TIES` and `TOP n WITH TIES` can return any number of rows that tie with the last one, so they are rejected; the generator's `enforceLimit` turns them into `FETCH ... ONLY` and plain `TOP n`.
 - An `allowedTables` entry matches a reference with the same qualification only: `"orders"` does not allow `shop.orders` or `otherdb..orders` (another schema or database can hold a different table of that name), and `"billing.invoices"` does not allow a bare `invoices`.
 - `allowedTables` now sees quoted, backticked, bracketed, schema-qualified and comma-listed tables (0.0.1 missed them, so they bypassed the allowlist).
 

@@ -214,3 +214,20 @@ describe('enforceLimit', () => {
     expect(pg.enforceLimit('SELECT * FROM t LIMIT $1', 100)).toBe('SELECT * FROM t LIMIT $1');
   });
 });
+
+describe('enforceLimit and WITH TIES', () => {
+  it('turns FETCH ... WITH TIES into ONLY and drops WITH TIES after TOP', () => {
+    expect(new QuerySanitizer('postgres').enforceLimit('SELECT * FROM t ORDER BY a FETCH FIRST 5 ROWS WITH TIES', 100)).toBe(
+      'SELECT * FROM t ORDER BY a FETCH FIRST 5 ROWS ONLY'
+    );
+    expect(new QuerySanitizer('postgres').enforceLimit('SELECT * FROM t ORDER BY a FETCH NEXT 500 ROWS WITH TIES', 100)).toBe(
+      'SELECT * FROM t ORDER BY a FETCH NEXT 100 ROWS ONLY'
+    );
+    expect(new QuerySanitizer('mssql').enforceLimit('SELECT TOP 100 WITH TIES * FROM t ORDER BY a', 5)).toBe(
+      'SELECT TOP 5 * FROM t ORDER BY a'
+    );
+    expect(new QuerySanitizer('mssql').enforceLimit('SELECT TOP (3) WITH TIES * FROM t ORDER BY a', 5)).toBe(
+      'SELECT TOP (3) * FROM t ORDER BY a'
+    );
+  });
+});
