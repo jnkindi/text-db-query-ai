@@ -85,14 +85,18 @@ const NO_STATEMENT_AFTER = words(`
 /**
  * Words after which a top-level parenthesized query is an operand or a branch
  * of this statement rather than a T-SQL statement of its own (after OPTION it
- * is a hint list such as `(MERGE JOIN, HASH JOIN)`).
+ * is a hint list such as `(MERGE JOIN, HASH JOIN)`). All are reserved in
+ * T-SQL, so none can be an alias there; APPLY and TIES count only after CROSS
+ * or OUTER and after WITH. Postgres words such as ARRAY, LATERAL and USING are
+ * left out on purpose: they are aliases to SQL Server (the stacking check runs
+ * only for mssql and the generic dialect).
  */
 const QUERY_GROUP_AFTER = words(`
-  UNION INTERSECT EXCEPT MINUS ALL DISTINCT IN EXISTS ANY SOME AS FROM JOIN APPLY LATERAL SELECT
-  WHERE AND OR NOT ON THEN ELSE WHEN CASE BY HAVING SET VALUES BETWEEN LIKE ILIKE USING MATERIALIZED
-  ARRAY RETURNING TIES PERCENT IS ESCAPE TOP OPTION
+  UNION INTERSECT EXCEPT ALL DISTINCT IN EXISTS ANY SOME AS FROM JOIN SELECT WHERE AND OR NOT ON
+  THEN ELSE WHEN CASE BY HAVING SET VALUES BETWEEN LIKE IS ESCAPE TOP PERCENT OPTION
 `);
-const SET_OPERATORS = words('UNION INTERSECT EXCEPT MINUS');
+/** T-SQL set operators. MINUS is not one (it would be an alias there). */
+const SET_OPERATORS = words('UNION INTERSECT EXCEPT');
 /** T-SQL statements that are complete without any argument. */
 const TSQL_COMPLETE_ALONE = words('COMMIT ROLLBACK SHUTDOWN CHECKPOINT RECONFIGURE REVERT SETUSER');
 
@@ -221,7 +225,7 @@ function isLoneParam(t: Token[], i: number): boolean {
   return !(next && (next.type === 'operator' || (next.type === 'word' && next.value === 'PERCENT')));
 }
 
-/** A UNION, INTERSECT, EXCEPT or MINUS, optionally with ALL or DISTINCT, right before `i`. */
+/** A UNION, INTERSECT or EXCEPT, optionally with ALL or DISTINCT, right before `i`. */
 function followsSetOperator(t: Token[], i: number): boolean {
   let k = i - 1;
   if (isWordAt(t, k, 'ALL') || isWordAt(t, k, 'DISTINCT')) k--;
@@ -897,7 +901,11 @@ export class SecurityValidator {
     const prev = t[i - 1];
     if (!prev) return false;
     if (prev.type === 'operator' || (prev.type === 'punct' && prev.value === ',')) return true;
-    if (prev.type === 'word' && QUERY_GROUP_AFTER.has(prev.value) && isWordAt(t, i - 1, prev.value)) return true;
+    if (prev.type === 'word' && isWordAt(t, i - 1, prev.value)) {
+      if (QUERY_GROUP_AFTER.has(prev.value)) return true;
+      if (prev.value === 'APPLY') return isWordAt(t, i - 2, 'CROSS') || isWordAt(t, i - 2, 'OUTER');
+      if (prev.value === 'TIES') return isWordAt(t, i - 2, 'WITH');
+    }
     // SELECT TOP 5 (SELECT ...), SELECT TOP (5) (SELECT ...)
     if (prev.type === 'number') return isWordAt(t, i - 2, 'TOP');
     if (isPunctAt(t, i - 1, ')')) {

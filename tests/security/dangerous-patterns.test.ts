@@ -204,6 +204,15 @@ describe('T-SQL queries stacked without ";"', () => {
     'SELECT * FROM orders WHERE note IS NULL (SELECT * FROM secrets)',
     'SELECT * FROM orders ORDER BY id DESC (SELECT * FROM secrets)',
     'SELECT * FROM orders WHERE id = @v (SELECT * FROM secrets)',
+    // Not set operators or reserved words in T-SQL, so aliases there
+    'SELECT * FROM orders minus SELECT * FROM secrets',
+    'SELECT * FROM orders lateral (SELECT * FROM secrets)',
+    'SELECT * FROM orders array (SELECT * FROM secrets)',
+    'SELECT * FROM orders returning (SELECT * FROM secrets)',
+    'SELECT * FROM orders materialized (SELECT * FROM secrets)',
+    'SELECT * FROM orders using (SELECT * FROM secrets)',
+    'SELECT * FROM orders ties (SELECT * FROM secrets)',
+    'SELECT * FROM orders apply (SELECT * FROM secrets)',
   ];
   const fine = [
     'SELECT a FROM t UNION SELECT a FROM u',
@@ -223,6 +232,8 @@ describe('T-SQL queries stacked without ";"', () => {
     'SELECT a FROM t GROUP BY a HAVING COUNT(*) > (SELECT 1) ORDER BY (SELECT 1)',
     'UPDATE t SET a = (SELECT MAX(b) FROM u) WHERE id IN (SELECT id FROM u)',
     'INSERT INTO t VALUES (1), ((SELECT 2))',
+    'SELECT o.id, x.n FROM orders o CROSS APPLY (SELECT COUNT(*) AS n FROM t) x OUTER APPLY (SELECT 1 AS m) y',
+    'SELECT TOP 5 WITH TIES (SELECT 1) AS a FROM t ORDER BY a',
   ];
 
   it.each(['mssql', undefined] as const)('rejects them (%s)', async (databaseType) => {
@@ -241,16 +252,22 @@ describe('T-SQL queries stacked without ";"', () => {
     }
   });
 
-  it('accepts the generic-dialect forms other databases use', async () => {
-    const v = new SecurityValidator({ requireUserContext: false, allowedOperations: ['SELECT', 'INSERT', 'DELETE'] });
+  it('accepts the Postgres forms with databaseType postgres; without a type they could be two T-SQL statements', async () => {
+    const config = { requireUserContext: false, allowedOperations: ['SELECT', 'INSERT', 'DELETE'] as const };
+    const postgres = new SecurityValidator({ ...config, allowedOperations: [...config.allowedOperations] }, { databaseType: 'postgres' });
+    const generic = new SecurityValidator({ ...config, allowedOperations: [...config.allowedOperations] });
     for (const sql of [
       'INSERT INTO t WITH x AS (SELECT 1 AS a) SELECT a FROM x',
       'SELECT ARRAY(SELECT 1) AS a FROM t',
       'DELETE FROM t USING (SELECT 1 AS id) x WHERE t.id = x.id',
-      'SELECT a FROM t WHERE b = ANY (SELECT b FROM u)',
+      'SELECT a FROM t CROSS JOIN LATERAL (SELECT 1 AS b) l',
     ]) {
-      expect({ sql, errors: (await v.validate(sql)).errors }).toEqual({ sql, errors: [] });
+      expect({ sql, errors: (await postgres.validate(sql)).errors }).toEqual({ sql, errors: [] });
     }
+    for (const sql of ['INSERT INTO t WITH x AS (SELECT 1 AS a) SELECT a FROM x', 'SELECT a FROM t WHERE b = ANY (SELECT b FROM u)']) {
+      expect({ sql, errors: (await generic.validate(sql)).errors }).toEqual({ sql, errors: [] });
+    }
+    expect((await generic.validate('SELECT ARRAY(SELECT 1) AS a FROM t')).valid).toBe(false);
   });
 
   it('keeps the row-level filter in the first statement', () => {
