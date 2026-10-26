@@ -110,6 +110,14 @@ export interface SecurityConfig {
   rowLevelSecurityColumn?: string;
   /** Reject queries that read schema columns marked `sensitive: true` (default: warn only). */
   enforceSensitiveColumns?: boolean;
+  /**
+   * How a bare restrictedColumns entry (one without a table) matches column
+   * names, case-insensitively. 'contains' (default, as in 0.0.1): `password`
+   * restricts password, password_hash and password_updated_at. 'exact': only
+   * a column named password. Entries of the form `table.column` always match
+   * that column of that table exactly. Strings and comments never match.
+   */
+  restrictedColumnsMatch?: 'contains' | 'exact';
 }
 
 /**
