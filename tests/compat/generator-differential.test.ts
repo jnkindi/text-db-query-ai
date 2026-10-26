@@ -16,6 +16,7 @@ import { ScriptedProvider } from '../generator/scripted-provider';
 const legacy = require('text-db-query-ai-legacy');
 
 const API_KEY = 'sk-test-not-a-real-key';
+const collapse = (s: string) => s.replace(/\s+/g, ' ');
 
 /** The "Manual Schema Definition" example from the 0.0.1 README. */
 const README_SCHEMA: DatabaseSchema = {
@@ -199,7 +200,9 @@ describe('generateQuery() on simple queries', () => {
   it.each(CASES.map((c) => [c.name, c] as const))('gives the 0.0.1 query, explanation and metadata (%s)', async (_name, c) => {
     const before = await legacyResult(c);
     const now = await currentResult(c);
-    expect(now.query).toBe(before.query);
+    // 0.0.1 put an extra space before ORDER BY / LIMIT when adding the RLS filter
+    // (see MODULO_SPACES in security-differential.test.ts); the SQL is otherwise identical.
+    expect(collapse(now.query)).toBe(collapse(before.query));
     expect(now.explanation).toBe(before.explanation);
     const { attempts, unknownIdentifiers, ...metadata } = now.metadata!;
     expect(metadata).toEqual(before.metadata);

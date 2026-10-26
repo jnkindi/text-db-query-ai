@@ -1006,6 +1006,8 @@ export class SecurityValidator {
       if (error.kind === 'executable_comment') {
         return `Query contains dangerous patterns: executable comment ${error.delimiter}`;
       }
+      // Generic `--x`: a comment to Postgres, SQLite and SQL Server, code to MySQL
+      if (error.kind === 'ambiguous_syntax') return `Query contains dangerous patterns: ${error.delimiter}`;
       if (alternate && this.lexes(query, alternate)) {
         return `Query contains dangerous patterns: ${AMBIGUOUS_ESCAPING}`;
       }

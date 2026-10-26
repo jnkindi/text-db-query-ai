@@ -550,8 +550,9 @@ export class QuerySanitizer {
       tokens = tokenize(input, this.dialect);
     } catch (error) {
       if (!(error instanceof SqlLexError)) throw error;
-      // An executable comment is code to MySQL: keep it, so validation rejects it.
-      return this.legacySanitize(input, error.kind !== 'executable_comment');
+      // An executable comment is code to MySQL, and generic `--x` is code to MySQL
+      // only: keep them, so validation rejects them.
+      return this.legacySanitize(input, error.kind !== 'executable_comment' && error.kind !== 'ambiguous_syntax');
     }
     return renderSanitized(tokens, this.dialect === 'generic');
   }
@@ -615,7 +616,7 @@ export class QuerySanitizer {
         return { valid: false, error: `Query must start with one of: ${VALID_STARTS.join(', ')}` };
       }
       // Not a syntax problem: the security validator rejects it with its own message.
-      if (error.kind === 'executable_comment') return { valid: true };
+      if (error.kind === 'executable_comment' || error.kind === 'ambiguous_syntax') return { valid: true };
       return { valid: false, error: lexErrorMessage(error) };
     }
 

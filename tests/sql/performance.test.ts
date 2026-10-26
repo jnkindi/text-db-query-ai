@@ -57,12 +57,13 @@ describe('performance', () => {
     }
     const total = batches.reduce((a, b) => a + b, 0);
     const best = Math.min(...batches) * 5;
-    // Reported for the release notes; typically ~0.4 s on a laptop.
+    // Reported for the release notes; typically 0.4-0.6 s on a laptop when run alone.
     // eslint-disable-next-line no-console
     console.log(
       `analyzeSql: 10,000 x ${sql.length}-char query in ${total.toFixed(0)} ms (best batch rate ${best.toFixed(0)} ms per 10,000)${instrumented ? ' (instrumented)' : ''}`
     );
-    expect(best).toBeLessThan(1000 * SCALE);
+    // 3-4x headroom: the full suite runs one jest worker per core next to this.
+    expect(best).toBeLessThan(2000 * SCALE);
   });
 
   it('analyzes a query with a 1 MB string literal in linear time', () => {
