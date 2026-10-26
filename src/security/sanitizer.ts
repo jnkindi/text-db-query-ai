@@ -461,17 +461,20 @@ function lexErrorMessage(error: SqlLexError): string {
  * rejects the ambiguous query instead of the sanitizer silently cutting it.
  */
 function renderSanitized(tokens: Token[], keepHashComments: boolean): string {
+  const keptComment = (tok: Token): boolean =>
+    tok.type === 'comment' && keepHashComments && tok.text.charCodeAt(0) === 35; /* # */
   let last = tokens.length - 1;
   while (last >= 0) {
     const tok = tokens[last];
-    if (tok.type === 'whitespace' || tok.type === 'comment' || (tok.type === 'punct' && tok.value === ';')) last--;
+    // A kept # comment at the end stays too: dropping it would cut the query short
+    if (tok.type === 'whitespace' || (tok.type === 'comment' && !keptComment(tok)) || (tok.type === 'punct' && tok.value === ';')) last--;
     else break;
   }
   let out = '';
   let gap = '';
   for (let i = 0; i <= last; i++) {
     const tok = tokens[i];
-    const kept = tok.type === 'comment' && keepHashComments && tok.text.charCodeAt(0) === 35; /* # */
+    const kept = keptComment(tok);
     if (tok.type === 'whitespace' || (tok.type === 'comment' && !kept)) {
       if (gap === '') gap = ' ';
       continue;

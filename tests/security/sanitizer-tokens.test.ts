@@ -3,6 +3,7 @@
  */
 
 import { QuerySanitizer } from '../../src/security/sanitizer';
+import { SecurityValidator } from '../../src/security/validator';
 
 const generic = new QuerySanitizer();
 const pg = new QuerySanitizer('postgres');
@@ -42,6 +43,16 @@ describe('sanitize', () => {
   it('removes NUL bytes first', () => {
     expect(pg.sanitize('SELECT 1;\0')).toBe('SELECT 1');
     expect(pg.sanitize("SELECT 'a\0b'")).toBe("SELECT 'ab'");
+  });
+
+  it('generic: keeps a trailing # comment too, so the query is not cut short', async () => {
+    const sql = "SELECT id FROM documents WHERE tenant_id = 5 AND data #> '{tags}' IS NOT NULL";
+    const out = generic.sanitize(sql);
+    expect(out).toContain("#> '{tags}' IS NOT NULL");
+    const v = new SecurityValidator({ requireUserContext: false });
+    expect((await v.validate(out)).valid).toBe(false);
+    // On MySQL it is a comment and is dropped
+    expect(new QuerySanitizer('mysql').sanitize('SELECT id FROM t # note')).toBe('SELECT id FROM t');
   });
 
   it('generic: keeps # comments (an operator to Postgres) so validation rejects them', () => {
