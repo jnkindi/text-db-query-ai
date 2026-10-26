@@ -82,6 +82,17 @@ const NO_STATEMENT_AFTER = words(`
   GROUP INNER LEFT RIGHT FULL OUTER CROSS APPLY FOR OPTION WITH ESCAPE COLLATE DO KEY USING TABLE
   OFFSET FETCH NEXT LIMIT UPDATE INSERT DELETE CHARACTER CHARSET INTERVAL AT DUPLICATE RETURNING
 `);
+/**
+ * Words after which a top-level parenthesized query is an operand or a branch
+ * of this statement rather than a T-SQL statement of its own (after OPTION it
+ * is a hint list such as `(MERGE JOIN, HASH JOIN)`).
+ */
+const QUERY_GROUP_AFTER = words(`
+  UNION INTERSECT EXCEPT MINUS ALL DISTINCT IN EXISTS ANY SOME AS FROM JOIN APPLY LATERAL SELECT
+  WHERE AND OR NOT ON THEN ELSE WHEN CASE BY HAVING SET VALUES BETWEEN LIKE ILIKE USING MATERIALIZED
+  ARRAY RETURNING TIES PERCENT IS ESCAPE TOP OPTION
+`);
+const SET_OPERATORS = words('UNION INTERSECT EXCEPT MINUS');
 /** T-SQL statements that are complete without any argument. */
 const TSQL_COMPLETE_ALONE = words('COMMIT ROLLBACK SHUTDOWN CHECKPOINT RECONFIGURE REVERT SETUSER');
 
@@ -208,6 +219,29 @@ function isLoneParam(t: Token[], i: number): boolean {
   if (!tok || tok.type !== 'param' || tok.text.startsWith('@')) return false;
   const next = t[isPunctAt(t, i, '(') ? k + 2 : k + 1];
   return !(next && (next.type === 'operator' || (next.type === 'word' && next.value === 'PERCENT')));
+}
+
+/** A UNION, INTERSECT, EXCEPT or MINUS, optionally with ALL or DISTINCT, right before `i`. */
+function followsSetOperator(t: Token[], i: number): boolean {
+  let k = i - 1;
+  if (isWordAt(t, k, 'ALL') || isWordAt(t, k, 'DISTINCT')) k--;
+  const tok = t[k];
+  return !!tok && tok.type === 'word' && SET_OPERATORS.has(tok.value) && isWordAt(t, k, tok.value);
+}
+
+/** A WITH that opens a CTE (`WITH [RECURSIVE] x [(cols)] AS (`), not a table hint, WITH TIES, ORDINALITY or TIME ZONE. */
+function opensCte(s: Shape, i: number): boolean {
+  const t = s.t;
+  let k = i + 1;
+  if (isWordAt(t, k, 'RECURSIVE')) k++;
+  if (!isNameToken(t[k])) return false;
+  k++;
+  if (isPunctAt(t, k, '(')) {
+    const close = s.pair[k];
+    if (close <= k) return false;
+    k = close + 1;
+  }
+  return isWordAt(t, k, 'AS') && isPunctAt(t, k + 1, '(');
 }
 
 function literalEnds(tokens: Token[]): number[] {
@@ -729,6 +763,8 @@ export class SecurityValidator {
     let setPending = headWord === 'UPDATE' || headWord === 'INSERT';
     // The first top-level query of INSERT ... SELECT is its source, unless VALUES came first
     let insertSource = headWord === 'INSERT';
+    // INSERT INTO t WITH x AS (...) SELECT ...: the SELECT after that CTE is the source too
+    let cteSource = false;
 
     if (index > 0 && LEGACY_STATEMENT_PATTERNS.has(headWord)) found.add(headWord);
 
@@ -755,10 +791,7 @@ export class SecurityValidator {
       }
       // T-SQL runs `... (SELECT ...)` after a complete expression as a statement of its own
       if (stacking && tok.type === 'punct' && tok.value === '(' && s.depth[i] === 0 && i > head && isQueryGroup(s, i)) {
-        const prev = t[i - 1];
-        const afterExpression =
-          prev.type === 'number' || prev.type === 'string' || (prev.type === 'punct' && (prev.value === ')' || prev.value === ']'));
-        if (afterExpression) {
+        if (!this.groupContinuesStatement(s, i)) {
           if (insertSource) insertSource = false;
           else found.add(MULTIPLE_STATEMENTS);
         }
@@ -819,11 +852,21 @@ export class SecurityValidator {
 
       // A second top-level SELECT or WITH starts a new T-SQL statement (SQL Server needs no ";",
       // and the driver returns the first statement's rows, which row-level security did not filter)
+      // Only a set operator or the INSERT source position continues the statement; anything
+      // else may be an alias named like a keyword (FROM orders next SELECT ...).
       if (stacking && i > head && s.depth[i] === 0) {
         if (v === 'VALUES') insertSource = false;
-        if ((v === 'SELECT' || v === 'WITH') && this.startsQueryStatement(s, i)) {
-          if (insertSource && v === 'SELECT') insertSource = false;
+        if (v === 'SELECT' && !followsSetOperator(t, i)) {
+          if (insertSource) insertSource = false;
+          else if (cteSource) cteSource = false;
           else found.add(MULTIPLE_STATEMENTS);
+        } else if (v === 'WITH' && opensCte(s, i)) {
+          if (insertSource) {
+            insertSource = false;
+            cteSource = true;
+          } else {
+            found.add(MULTIPLE_STATEMENTS);
+          }
         }
       }
 
@@ -844,29 +887,24 @@ export class SecurityValidator {
    * by something a statement can start with.
    */
   /**
-   * Whether the top-level SELECT or WITH at `i` begins a new statement rather
-   * than continuing this one: it does not follow a set operator, `(`, `,`, an
-   * operator or another word that needs a query after it, and a WITH opens a
-   * CTE (`WITH [RECURSIVE] x [(cols)] AS (`), not a table hint, WITH TIES,
-   * WITH ORDINALITY or WITH TIME ZONE.
+   * Whether the top-level query group opened at `i` is part of this statement:
+   * it follows an operator, a comma, a word that takes a query or expression
+   * next, or the count of TOP. After a name, a literal, a variable, `)` or a
+   * word such as NULL or DESC it is a T-SQL statement of its own.
    */
-  private startsQueryStatement(s: Shape, i: number): boolean {
+  private groupContinuesStatement(s: Shape, i: number): boolean {
     const t = s.t;
     const prev = t[i - 1];
-    if (!prev || prev.type === 'operator') return false;
-    if (prev.type === 'punct' && prev.value !== ')' && prev.value !== ']') return false;
-    if (prev.type === 'word' && NO_STATEMENT_AFTER.has(prev.value) && isWordAt(t, i - 1, prev.value)) return false;
-    if (t[i].value === 'SELECT') return true;
-    let k = i + 1;
-    if (isWordAt(t, k, 'RECURSIVE')) k++;
-    if (!isNameToken(t[k])) return false;
-    k++;
-    if (isPunctAt(t, k, '(')) {
-      const close = s.pair[k];
-      if (close <= k) return false;
-      k = close + 1;
+    if (!prev) return false;
+    if (prev.type === 'operator' || (prev.type === 'punct' && prev.value === ',')) return true;
+    if (prev.type === 'word' && QUERY_GROUP_AFTER.has(prev.value) && isWordAt(t, i - 1, prev.value)) return true;
+    // SELECT TOP 5 (SELECT ...), SELECT TOP (5) (SELECT ...)
+    if (prev.type === 'number') return isWordAt(t, i - 2, 'TOP');
+    if (isPunctAt(t, i - 1, ')')) {
+      const open = s.pair[i - 1];
+      return open > 0 && isWordAt(t, open - 1, 'TOP');
     }
-    return isWordAt(t, k, 'AS') && isPunctAt(t, k + 1, '(');
+    return false;
   }
 
   private startsStatement(t: Token[], i: number): boolean {

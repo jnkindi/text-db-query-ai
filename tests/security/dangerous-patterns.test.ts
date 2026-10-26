@@ -196,6 +196,14 @@ describe('T-SQL queries stacked without ";"', () => {
     'SELECT * FROM orders WITH RECURSIVE x AS (SELECT 1 AS a) SELECT * FROM x',
     'SELECT * FROM orders WHERE (id = 1) (SELECT 1)',
     'UPDATE orders SET total = 1 WHERE id = 2 SELECT * FROM orders',
+    // Words that are keywords elsewhere but legal T-SQL aliases or operands
+    'SELECT * FROM orders next SELECT * FROM secrets',
+    'SELECT * FROM orders AS limit SELECT * FROM secrets',
+    'SELECT * FROM orders key SELECT * FROM secrets',
+    'SELECT * FROM orders o (SELECT * FROM secrets)',
+    'SELECT * FROM orders WHERE note IS NULL (SELECT * FROM secrets)',
+    'SELECT * FROM orders ORDER BY id DESC (SELECT * FROM secrets)',
+    'SELECT * FROM orders WHERE id = @v (SELECT * FROM secrets)',
   ];
   const fine = [
     'SELECT a FROM t UNION SELECT a FROM u',
@@ -209,6 +217,12 @@ describe('T-SQL queries stacked without ";"', () => {
     'SELECT id FROM orders WITH (NOLOCK) WHERE id IN (SELECT id FROM t)',
     'SELECT TOP 5 WITH TIES id FROM orders ORDER BY total',
     'SELECT id, (SELECT MAX(total) FROM orders) AS m FROM t WHERE EXISTS (SELECT 1 FROM u)',
+    'SELECT TOP 5 (SELECT 1) AS a FROM t',
+    'SELECT a, (SELECT 1) AS b, CASE WHEN (SELECT 1) = 1 THEN 1 END AS c FROM t',
+    'SELECT a FROM t WHERE b BETWEEN (SELECT 1) AND (SELECT 2) AND c IN (SELECT 3)',
+    'SELECT a FROM t GROUP BY a HAVING COUNT(*) > (SELECT 1) ORDER BY (SELECT 1)',
+    'UPDATE t SET a = (SELECT MAX(b) FROM u) WHERE id IN (SELECT id FROM u)',
+    'INSERT INTO t VALUES (1), ((SELECT 2))',
   ];
 
   it.each(['mssql', undefined] as const)('rejects them (%s)', async (databaseType) => {
@@ -223,6 +237,18 @@ describe('T-SQL queries stacked without ";"', () => {
       });
     }
     for (const sql of fine) {
+      expect({ sql, errors: (await v.validate(sql)).errors }).toEqual({ sql, errors: [] });
+    }
+  });
+
+  it('accepts the generic-dialect forms other databases use', async () => {
+    const v = new SecurityValidator({ requireUserContext: false, allowedOperations: ['SELECT', 'INSERT', 'DELETE'] });
+    for (const sql of [
+      'INSERT INTO t WITH x AS (SELECT 1 AS a) SELECT a FROM x',
+      'SELECT ARRAY(SELECT 1) AS a FROM t',
+      'DELETE FROM t USING (SELECT 1 AS id) x WHERE t.id = x.id',
+      'SELECT a FROM t WHERE b = ANY (SELECT b FROM u)',
+    ]) {
       expect({ sql, errors: (await v.validate(sql)).errors }).toEqual({ sql, errors: [] });
     }
   });
