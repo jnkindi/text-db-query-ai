@@ -1,0 +1,25 @@
+// Parser fixture: MySQL native types and enums.
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+enum Size {
+  SMALL @map("s")
+  LARGE @map("it's large")
+}
+
+model Product {
+  id      Int      @id @default(autoincrement()) @db.UnsignedInt
+  sku     String   @unique
+  size    Size?
+  title   String   @db.VarChar(100)
+  body    String?  @db.LongText
+  price   Decimal  @db.Decimal(8, 2)
+  active  Boolean  @default(true)
+  addedAt DateTime @default(now())
+  blob    Bytes?
+
+  @@fulltext([title, body])
+  @@index([title(length: 10)])
+}

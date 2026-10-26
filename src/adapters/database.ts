@@ -2,14 +2,9 @@
  * Direct Database Introspection Adapter
  */
 
-import {
-  DatabaseSchema,
-  TableSchema,
-  ColumnSchema,
-  ForeignKeySchema,
-  DatabaseType,
-} from '../types';
-import { ORMAdapter, SchemaExtractionOptions } from './types';
+import { DatabaseSchema, DatabaseType } from '../types';
+import { ORMAdapter, SchemaExtractionOptions, IntrospectionExecutor } from './types';
+import { introspectSchema } from './introspection';
 
 /**
  * Database connection configuration
@@ -24,6 +19,78 @@ export interface DatabaseConnection {
 }
 
 /**
+ * How a connection object runs SQL, detected from its methods.
+ * - mssql: mssql ConnectionPool or Transaction (`request().input().query()`)
+ * - mysql2-callback: mysql2 callback API, used through its `.promise()` wrapper
+ * - query: `query(sql, params)` returning a promise (pg Pool/Client, PGlite, mysql2/promise)
+ *   or an event-emitting query object (callback drivers such as mysqljs/mysql)
+ * - sqlite3: sqlite3 Database (`all(sql, params, callback)`)
+ * - prepare: synchronous `prepare(sql)` (better-sqlite3, node:sqlite)
+ */
+type ConnectionKind = 'mssql' | 'mysql2-callback' | 'query' | 'sqlite3' | 'prepare';
+
+const UNSUPPORTED_CONNECTION =
+  'Unsupported connection type: expected a pg Pool/Client, PGlite, mysql2 connection or pool, ' +
+  'sqlite3, better-sqlite3 or node:sqlite database, or mssql ConnectionPool ' +
+  '(use PrismaAdapter for a Prisma client)';
+
+function detectConnectionKind(connection: any): ConnectionKind | undefined {
+  if (!connection || (typeof connection !== 'object' && typeof connection !== 'function')) {
+    return undefined;
+  }
+  // mssql pools also have query(), so check request() first.
+  if (typeof connection.request === 'function') return 'mssql';
+  if (typeof connection.query === 'function') {
+    // Only mysql2's callback classes have promise(); their query() returns a Query object.
+    return typeof connection.promise === 'function' ? 'mysql2-callback' : 'query';
+  }
+  if (typeof connection.all === 'function') return 'sqlite3';
+  if (typeof connection.prepare === 'function') return 'prepare';
+  return undefined;
+}
+
+/** An event-emitting query object, returned by callback drivers called without a callback. */
+function isQueryEmitter(value: any): boolean {
+  return (
+    !!value &&
+    typeof value.then !== 'function' &&
+    typeof value.on === 'function' &&
+    value.rows === undefined &&
+    !Array.isArray(value)
+  );
+}
+
+/**
+ * Wait for a mysql-style Query object to finish. Resolves to the rows of the
+ * first result set, or to its OK packet for statements that return no rows
+ * (the shapes mysql2/promise returns as the first element).
+ */
+function collectQueryEvents(query: any): Promise<any> {
+  return new Promise((resolve, reject) => {
+    const rows: unknown[] = [];
+    let isRowSet = false;
+    let header: unknown;
+    let failed = false;
+
+    query.on('fields', (fields: unknown) => {
+      if (rows.length === 0 && header === undefined) isRowSet = Array.isArray(fields);
+    });
+    query.on('result', (row: unknown, index?: number) => {
+      if (index !== undefined && index > 0) return; // later statements of a multi-statement query
+      if (isRowSet) rows.push(row);
+      else if (header === undefined) header = row;
+    });
+    query.on('error', (error: unknown) => {
+      failed = true;
+      reject(error);
+    });
+    query.on('end', () => {
+      if (!failed) resolve(header !== undefined ? header : rows);
+    });
+  });
+}
+
+/**
  * Direct database introspection adapter
  * Works with any database connection without requiring an ORM
  */
@@ -31,6 +98,8 @@ export class DatabaseIntrospectionAdapter implements ORMAdapter {
   private connection: any;
   private databaseType: DatabaseType;
   private options: SchemaExtractionOptions;
+  private connectionKind?: ConnectionKind;
+  private mysqlPromiseConnection?: any;
 
   constructor(
     connection: any,
@@ -43,62 +112,69 @@ export class DatabaseIntrospectionAdapter implements ORMAdapter {
   }
 
   /**
-   * Extract schema from database by introspection
+   * Extract schema from database by introspection.
+   *
+   * Runs a fixed number of catalog queries whatever the number of tables
+   * (see `introspectSchema`). Queries go through `executeQuery`.
    */
   async extractSchema(): Promise<DatabaseSchema> {
-    const tables: TableSchema[] = [];
-
+    const execute: IntrospectionExecutor = (sql, params) => this.executeQuery(sql, params);
     try {
-      const tableNames = await this.getTableNames();
-
-      for (const tableName of tableNames) {
-        if (this.options.includeTables && !this.options.includeTables.includes(tableName)) {
-          continue;
-        }
-
-        if (this.options.excludeTables && this.options.excludeTables.includes(tableName)) {
-          continue;
-        }
-
-        const columns = await this.getTableColumns(tableName);
-        const foreignKeys = await this.getForeignKeys(tableName);
-        const primaryKey = await this.getPrimaryKey(tableName);
-
-        tables.push({
-          name: tableName,
-          columns,
-          primaryKey,
-          foreignKeys: foreignKeys.length > 0 ? foreignKeys : undefined,
-        });
-      }
+      return await introspectSchema(execute, this.databaseType, this.options);
     } catch (error: any) {
       throw new Error(`Failed to introspect database: ${error.message}`);
     }
-
-    return {
-      databaseType: this.databaseType,
-      tables,
-    };
   }
 
   /**
-   * Execute a query
+   * Execute a query.
+   *
+   * Resolves to the rows of a SELECT, as 0.0.1 did. For other statements it
+   * resolves to what the driver reports (for example mysql2's ResultSetHeader,
+   * better-sqlite3's run() info or the mssql result). Parameters use the
+   * driver's placeholders: `$1` for pg and PGlite, `?` for mysql2 and the SQLite
+   * drivers, `@P1`, `@P2`... for mssql.
+   *
+   * @param query - SQL to run
+   * @param parameters - Values bound to the placeholders
    */
   async executeQuery(query: string, parameters?: any[]): Promise<any> {
-    if (this.connection.query) {
-      // pg, mysql2
-      const result = await this.connection.query(query, parameters);
-      return result.rows || result[0]; // pg returns .rows, mysql returns array
-    } else if (this.connection.all) {
-      // sqlite3
-      return new Promise((resolve, reject) => {
-        this.connection.all(query, parameters || [], (err: any, rows: any) => {
-          if (err) reject(err);
-          else resolve(rows);
+    switch (this.getConnectionKind()) {
+      case 'query': {
+        // pg, PGlite, mysql2/promise
+        const pending = this.connection.query(query, parameters);
+        // A callback driver called without a callback returns a Query object that emits rows.
+        if (isQueryEmitter(pending)) return collectQueryEvents(pending);
+        const result = await pending;
+        return result.rows || result[0]; // pg returns .rows, mysql returns array
+      }
+      case 'mysql2-callback': {
+        const [rows] = await this.getMysqlPromiseConnection().query(query, parameters);
+        return rows;
+      }
+      case 'sqlite3':
+        return new Promise((resolve, reject) => {
+          this.connection.all(query, parameters || [], (err: any, rows: any) => {
+            if (err) reject(err);
+            else resolve(rows);
+          });
         });
-      });
-    } else {
-      throw new Error('Unsupported connection type');
+      case 'prepare': {
+        // better-sqlite3 and node:sqlite are synchronous.
+        const statement = this.connection.prepare(query);
+        const values = parameters || [];
+        // better-sqlite3 refuses all() on statements that return no rows.
+        if (statement.reader === false) return statement.run(...values);
+        return statement.all(...values);
+      }
+      case 'mssql': {
+        const request = this.connection.request();
+        (parameters || []).forEach((value, index) => request.input(`P${index + 1}`, value));
+        const result = await request.query(query);
+        return result?.recordset ?? result;
+      }
+      default:
+        throw new Error(UNSUPPORTED_CONNECTION);
     }
   }
 
@@ -109,254 +185,14 @@ export class DatabaseIntrospectionAdapter implements ORMAdapter {
     return this.databaseType;
   }
 
-  /**
-   * Get all table names
-   */
-  private async getTableNames(): Promise<string[]> {
-    let query: string;
-
-    switch (this.databaseType) {
-      case 'postgres':
-        query = `
-          SELECT tablename as table_name
-          FROM pg_tables
-          WHERE schemaname = 'public'
-          ORDER BY tablename
-        `;
-        break;
-      case 'mysql':
-        query = `
-          SELECT table_name
-          FROM information_schema.tables
-          WHERE table_schema = DATABASE()
-          ORDER BY table_name
-        `;
-        break;
-      case 'sqlite':
-        query = `
-          SELECT name as table_name
-          FROM sqlite_master
-          WHERE type = 'table'
-            AND name NOT LIKE 'sqlite_%'
-          ORDER BY name
-        `;
-        break;
-      case 'mssql':
-        query = `
-          SELECT table_name
-          FROM information_schema.tables
-          WHERE table_type = 'BASE TABLE'
-          ORDER BY table_name
-        `;
-        break;
-      default:
-        throw new Error(`Unsupported database type: ${this.databaseType}`);
-    }
-
-    const result = await this.executeQuery(query);
-    return result.map((row: any) => row.table_name || row.tablename);
+  private getConnectionKind(): ConnectionKind | undefined {
+    if (!this.connectionKind) this.connectionKind = detectConnectionKind(this.connection);
+    return this.connectionKind;
   }
 
-  /**
-   * Get columns for a table
-   */
-  private async getTableColumns(tableName: string): Promise<ColumnSchema[]> {
-    let query: string;
-
-    switch (this.databaseType) {
-      case 'postgres':
-        query = `
-          SELECT
-            column_name,
-            data_type,
-            is_nullable,
-            column_default,
-            character_maximum_length
-          FROM information_schema.columns
-          WHERE table_name = $1
-            AND table_schema = 'public'
-          ORDER BY ordinal_position
-        `;
-        break;
-      case 'mysql':
-        query = `
-          SELECT
-            column_name,
-            data_type,
-            is_nullable,
-            column_default,
-            character_maximum_length
-          FROM information_schema.columns
-          WHERE table_name = ?
-            AND table_schema = DATABASE()
-          ORDER BY ordinal_position
-        `;
-        break;
-      case 'sqlite':
-        query = `PRAGMA table_info(${tableName})`;
-        break;
-      case 'mssql':
-        query = `
-          SELECT
-            column_name,
-            data_type,
-            is_nullable
-          FROM information_schema.columns
-          WHERE table_name = @tableName
-          ORDER BY ordinal_position
-        `;
-        break;
-      default:
-        throw new Error(`Unsupported database type: ${this.databaseType}`);
-    }
-
-    const result = await this.executeQuery(
-      query,
-      this.databaseType === 'sqlite' ? [] : [tableName]
-    );
-
-    return result.map((row: any) => {
-      const columnName = row.column_name || row.name;
-      const isSensitive = this.options.markSensitiveColumns?.some((pattern) =>
-        columnName.toLowerCase().includes(pattern.toLowerCase())
-      ) || false;
-
-      return {
-        name: columnName,
-        type: this.normalizeDataType(row.data_type || row.type),
-        nullable: row.is_nullable === 'YES' || row.notnull === 0,
-        sensitive: isSensitive,
-      };
-    });
-  }
-
-  /**
-   * Get foreign keys for a table
-   */
-  private async getForeignKeys(tableName: string): Promise<ForeignKeySchema[]> {
-    let query: string;
-
-    try {
-      switch (this.databaseType) {
-        case 'postgres':
-          query = `
-            SELECT
-              kcu.column_name,
-              ccu.table_name AS referenced_table,
-              ccu.column_name AS referenced_column
-            FROM information_schema.table_constraints AS tc
-            JOIN information_schema.key_column_usage AS kcu
-              ON tc.constraint_name = kcu.constraint_name
-              AND tc.table_schema = kcu.table_schema
-            JOIN information_schema.constraint_column_usage AS ccu
-              ON ccu.constraint_name = tc.constraint_name
-              AND ccu.table_schema = tc.table_schema
-            WHERE tc.constraint_type = 'FOREIGN KEY'
-              AND tc.table_name = $1
-          `;
-          break;
-        case 'mysql':
-          query = `
-            SELECT
-              column_name,
-              referenced_table_name AS referenced_table,
-              referenced_column_name AS referenced_column
-            FROM information_schema.key_column_usage
-            WHERE table_name = ?
-              AND referenced_table_name IS NOT NULL
-              AND table_schema = DATABASE()
-          `;
-          break;
-        case 'sqlite':
-          query = `PRAGMA foreign_key_list(${tableName})`;
-          break;
-        default:
-          return [];
-      }
-
-      const result = await this.executeQuery(
-        query,
-        this.databaseType === 'sqlite' ? [] : [tableName]
-      );
-
-      return result.map((row: any) => ({
-        column: row.column_name || row.from,
-        referencedTable: row.referenced_table || row.table,
-        referencedColumn: row.referenced_column || row.to,
-      }));
-    } catch (error) {
-      return [];
-    }
-  }
-
-  /**
-   * Get primary key for a table
-   */
-  private async getPrimaryKey(tableName: string): Promise<string | undefined> {
-    let query: string;
-
-    try {
-      switch (this.databaseType) {
-        case 'postgres':
-          query = `
-            SELECT a.attname as column_name
-            FROM pg_index i
-            JOIN pg_attribute a ON a.attrelid = i.indrelid
-              AND a.attnum = ANY(i.indkey)
-            WHERE i.indrelid = $1::regclass
-              AND i.indisprimary
-          `;
-          break;
-        case 'mysql':
-          query = `
-            SELECT column_name
-            FROM information_schema.key_column_usage
-            WHERE table_name = ?
-              AND constraint_name = 'PRIMARY'
-              AND table_schema = DATABASE()
-            LIMIT 1
-          `;
-          break;
-        case 'sqlite':
-          query = `PRAGMA table_info(${tableName})`;
-          break;
-        default:
-          return undefined;
-      }
-
-      const result = await this.executeQuery(
-        query,
-        this.databaseType === 'sqlite' ? [] : [tableName]
-      );
-
-      if (this.databaseType === 'sqlite') {
-        const pkColumn = result.find((row: any) => row.pk === 1);
-        return pkColumn?.name;
-      }
-
-      return result[0]?.column_name;
-    } catch (error) {
-      return undefined;
-    }
-  }
-
-  /**
-   * Normalize data types
-   */
-  private normalizeDataType(type: string): string {
-    const lowerType = type.toLowerCase();
-
-    if (lowerType.includes('int')) return 'integer';
-    if (lowerType.includes('char') || lowerType.includes('varchar')) return 'varchar';
-    if (lowerType.includes('text')) return 'text';
-    if (lowerType.includes('bool')) return 'boolean';
-    if (lowerType.includes('timestamp') || lowerType.includes('datetime')) return 'timestamp';
-    if (lowerType.includes('date')) return 'date';
-    if (lowerType.includes('decimal') || lowerType.includes('numeric')) return 'decimal';
-    if (lowerType.includes('float') || lowerType.includes('double')) return 'decimal';
-    if (lowerType.includes('json')) return 'json';
-
-    return 'varchar';
+  private getMysqlPromiseConnection(): any {
+    if (!this.mysqlPromiseConnection) this.mysqlPromiseConnection = this.connection.promise();
+    return this.mysqlPromiseConnection;
   }
 }
 

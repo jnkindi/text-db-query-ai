@@ -1,0 +1,30 @@
+// The sample schema from examples/prisma-integration.ts. 0.0.1 parsed the User
+// model into "user" with columns id, email, unique, String, Sensitive, orders,
+// createdAt, and createdAt as the primary key.
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+model User {
+  id        Int      @id @default(autoincrement())
+  email     String   @unique
+  name      String
+  password  String   // Sensitive
+  role      String   @default("user")
+  orders    Order[]
+  createdAt DateTime @default(now())
+}
+
+model Order {
+  id        Int      @id @default(autoincrement())
+  userId    Int
+  user      User     @relation(fields: [userId], references: [id])
+  total     Decimal
+  status    String   @default("pending")
+  createdAt DateTime @default(now())
+}

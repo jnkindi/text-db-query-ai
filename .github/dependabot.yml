@@ -1,0 +1,34 @@
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7 # let new releases age a week before proposing them
+    groups:
+      dev-dependencies:
+        dependency-type: development
+        update-types: [minor, patch]
+    ignore:
+      # The 0.0.1 build that the compatibility tests compare against. It is an
+      # npm alias of this package and must stay at 0.0.1.
+      - dependency-name: text-db-query-ai-legacy
+      - dependency-name: text-db-query-ai
+      # openai 7 requires Node 22; it is deferred to a major release (engines >=18).
+      - dependency-name: openai
+        update-types: ["version-update:semver-major"]
+      # Node types track the lowest supported Node version, not the newest.
+      - dependency-name: "@types/node"
+        update-types: ["version-update:semver-major"]
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      github-actions:
+        patterns: ["*"]

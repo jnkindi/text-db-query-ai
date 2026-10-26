@@ -1,0 +1,99 @@
+// Parser fixture: most of the syntax a real PostgreSQL schema uses.
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["views"]
+}
+
+/// Access level of an account
+enum Role {
+  USER
+  ADMIN       @map("admin")
+  SUPER_ADMIN @map("super-admin")
+
+  @@map("role")
+}
+
+enum Status {
+  DRAFT
+  PUBLISHED
+}
+
+/// A registered account
+/// (one per email address)
+model User {
+  id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  /// Login email
+  email       String   @unique @db.VarChar(255)
+  displayName String?  @map("display_name")
+  role        Role     @default(USER)
+  roles       Role[]
+  tags        String[] @default([])
+  settings    Json     @default("{}") // braces inside a string must not end the model
+  type        String   @default("person") /// account kind
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt   DateTime @updatedAt
+  // Sensitive data below: relation fields are not columns
+  posts       Post[]   @relation("Authored")
+  profile     Profile?
+
+  @@index([email, createdAt(sort: Desc)])
+  @@map("users")
+}
+
+model Profile {
+  userId String @id @map("user_id") @db.Uuid
+  bio    String @db.Text
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model Post {
+  id        Int       @id @default(autoincrement())
+  title     String    @db.VarChar(200)
+  status    Status    @default(DRAFT)
+  authorId  String    @map("author_id") @db.Uuid
+  author    User      @relation("Authored", fields: [authorId], references: [id])
+  price     Decimal   @db.Decimal(10, 2)
+  rating    Float
+  views     BigInt    @default(0)
+  published Boolean   @default(false)
+  location  Unsupported("geography(Point,4326)")?
+  comments  Comment[]
+
+  @@unique([authorId, title])
+  @@index([
+    title,
+    status
+  ])
+}
+
+model Comment {
+  postId  Int
+  lineNo  Int     @map("line_no")
+  body    String
+  post    Post    @relation(fields: [postId], references: [id])
+  replies Reply[]
+
+  @@id([postId, lineNo])
+  @@map("comments")
+}
+
+model Reply {
+  id            Int     @id @default(autoincrement())
+  commentPostId Int     @map("comment_post_id")
+  commentLineNo Int     @map("comment_line_no")
+  comment       Comment @relation(fields: [commentPostId, commentLineNo], references: [postId, lineNo])
+}
+
+view PostStats {
+  postId   Int @unique
+  comments Int
+}
+
+type Address {
+  street String
+}

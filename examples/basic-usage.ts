@@ -1,23 +1,25 @@
 /**
  * Basic Usage Example
  *
- * This example demonstrates the basic setup and usage of text-db-query-ai
+ * A query generator with a hand-written schema. It generates SQL and shows
+ * the result; it does not execute anything.
+ *
+ * Run: OPENAI_API_KEY=... npx ts-node basic-usage.ts
  */
 
-import { createQueryGenerator } from '../src';
+import { createQueryGenerator, TextToQueryError } from '../src';
 
 async function main() {
   // 1. Create a query generator with your configuration
   const generator = createQueryGenerator({
-    // LLM Configuration
+    // LLM configuration. The model defaults to 'gpt-6-luna' for OpenAI and
+    // 'claude-opus-5-5' for Claude; pin it in production with `model`.
     llm: {
-      provider: 'openai', // or 'claude'
+      provider: 'openai', // or 'claude' with ANTHROPIC_API_KEY
       apiKey: process.env.OPENAI_API_KEY || 'your-api-key-here',
-      model: 'gpt-4o-mini', // optional
-      temperature: 0.1, // optional
     },
 
-    // Database Schema
+    // Database schema
     database: {
       databaseType: 'postgres',
       tables: [
@@ -28,7 +30,7 @@ async function main() {
             { name: 'id', type: 'integer', description: 'User ID' },
             { name: 'email', type: 'varchar', nullable: false },
             { name: 'name', type: 'varchar' },
-            { name: 'role', type: 'varchar', description: 'User role (admin, user)' },
+            { name: 'role', type: 'varchar', enumValues: ['admin', 'user'] },
             { name: 'created_at', type: 'timestamp' },
           ],
           primaryKey: 'id',
@@ -54,7 +56,7 @@ async function main() {
             { name: 'product_id', type: 'integer' },
             { name: 'quantity', type: 'integer' },
             { name: 'total', type: 'decimal' },
-            { name: 'status', type: 'varchar' },
+            { name: 'status', type: 'varchar', enumValues: ['pending', 'paid', 'shipped', 'cancelled'] },
             { name: 'created_at', type: 'timestamp' },
           ],
           primaryKey: 'id',
@@ -66,48 +68,44 @@ async function main() {
       ],
     },
 
-    // Security Configuration
+    // Security configuration
     security: {
-      allowedOperations: ['SELECT'], // Only allow read operations
-      maxRowLimit: 100, // Limit results to 100 rows
-      enableRowLevelSecurity: true, // Filter results by user_id
+      allowedOperations: ['SELECT'], // read-only
+      maxRowLimit: 100, // adds or lowers the LIMIT of every SELECT
     },
 
-    // Debug mode
+    // Debug logging (API keys are never logged)
     debug: true,
   });
 
-  // 2. Validate API key
+  // 2. Validate the API key (lists models; uses no tokens)
   console.log('Validating API key...');
   const isValid = await generator.validateApiKey();
   if (!isValid) {
     console.error('Invalid API key!');
     return;
   }
-  console.log('API key is valid ✓\n');
+  console.log('API key is valid\n');
 
-  // 3. Generate queries from natural language
-  const examples = [
+  // 3. Generate queries from natural language. Every request needs a user
+  //    context unless security.requireUserContext is false.
+  const user = { userId: 123, role: 'user' };
+  const questions = [
     'Show me all users',
     'Find products with price less than 50',
-    'Show my last 5 orders',
     'What are the most popular products?',
     'Count total orders by status',
   ];
 
-  for (const example of examples) {
+  for (const question of questions) {
     console.log(`\n${'='.repeat(60)}`);
-    console.log(`Question: ${example}`);
+    console.log(`Question: ${question}`);
     console.log('='.repeat(60));
 
     try {
-      // Generate query with user context
-      const result = await generator.generateQuery(example, {
-        userId: 123,
-        role: 'user',
-      });
+      const result = await generator.generateQuery(question, user);
 
-      console.log('\nGenerated Query:');
+      console.log('\nGenerated query:');
       console.log(result.query);
 
       if (result.warnings && result.warnings.length > 0) {
@@ -116,29 +114,33 @@ async function main() {
       }
 
       console.log('\nMetadata:');
-      console.log(`  Operation: ${result.metadata?.operation}`);
-      console.log(`  Tables: ${result.metadata?.tables.join(', ')}`);
+      console.log(`  Operation:  ${result.metadata?.operation}`);
+      console.log(`  Tables:     ${result.metadata?.tables.join(', ')}`);
       console.log(`  Complexity: ${result.metadata?.estimatedComplexity}`);
-    } catch (error: any) {
-      console.error('\nError:', error.message);
+      console.log(`  Model calls: ${result.metadata?.attempts}`);
+    } catch (error) {
+      if (error instanceof TextToQueryError) {
+        console.error(`\nError (${error.code}): ${error.message}`);
+      } else {
+        throw error;
+      }
     }
   }
 
-  // 4. Generate query with explanation
+  // 4. Generate a query with a plain-language explanation (one more model call)
   console.log(`\n\n${'='.repeat(60)}`);
   console.log('QUERY WITH EXPLANATION');
   console.log('='.repeat(60));
 
-  const resultWithExplanation = await generator.generateQueryWithExplanation(
+  const withExplanation = await generator.generateQueryWithExplanation(
     'Show me the top 5 users with the most orders',
     { userId: 123, role: 'admin' }
   );
 
   console.log('\nQuery:');
-  console.log(resultWithExplanation.query);
+  console.log(withExplanation.query);
   console.log('\nExplanation:');
-  console.log(resultWithExplanation.explanation);
+  console.log(withExplanation.explanation);
 }
 
-// Run the example
 main().catch(console.error);

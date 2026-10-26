@@ -1,0 +1,37 @@
+text-db-query-ai
+Copyright (c) 2024-2026 jnkindi
+
+This package is licensed under the MIT License (see LICENSE).
+
+It contains no source code copied from other projects. Its runtime
+dependencies are installed by npm as separate packages, each under its own
+license, which ships in the package's directory under node_modules.
+
+--------------------------------------------------------------------------------
+
+Runtime dependencies
+
+openai (OpenAI Node.js SDK)
+  License:    Apache-2.0
+  Copyright:  OpenAI
+  Repository: https://github.com/openai/openai-node
+
+@anthropic-ai/sdk (Anthropic TypeScript SDK)
+  License:    Apache-2.0 (from version 1.0.0; earlier versions were MIT)
+  Copyright:  Anthropic, PBC.
+  Repository: https://github.com/anthropics/anthropic-sdk-typescript
+
+When text-db-query-ai 0.1.0 was released, the packages these two depend on
+were licensed under MIT, Apache-2.0 or the Unlicense. Run
+`npm ls --omit=dev --all` in your project to see the packages actually
+installed, and check each one's license field.
+
+Optional peer dependencies (pg, mysql2, sqlite3, @prisma/client) are not
+installed by this package. If you install them, their own licenses apply.
+
+--------------------------------------------------------------------------------
+
+Security
+
+To report a vulnerability, follow SECURITY.md:
+https://github.com/jnkindi/text-db-query-ai/blob/main/SECURITY.md

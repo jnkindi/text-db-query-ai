@@ -1,0 +1,35 @@
+// Parser fixture: syntax that a line-by-line regex gets wrong.
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Note {
+  id      Int     @id(map: "note_pk") @default(autoincrement())
+  closer  String  @default(")") // a closing paren inside a string
+  brace   String  @default("}") /// a closing brace inside a string
+  comma   String  @default(",") @map(name: "comma_col")
+  bracket String  @default("[") @db.VarChar(1)
+  quote   String  @default("say \"hi\"")
+  slashes String  @default("http://example.com") // "//" inside a string is not a comment
+  tags    Int[]
+  ownerId Int     @map("owner_id")
+  owner   Owner   @relation(
+    name: "owned",
+    fields: [ownerId],
+    references: [id],
+    onDelete: Cascade,
+    onUpdate: NoAction
+  )
+
+  @@index([closer, brace], map: "note_closer_brace_idx")
+}
+
+model Owner {
+  id    Int    @unique @map("owner_pk")
+  org   String
+  notes Note[] @relation("owned")
+
+  @@id(fields: [id, org], name: "owner_key")
+  @@map(name: "owners")
+}

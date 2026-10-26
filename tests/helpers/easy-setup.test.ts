@@ -4,15 +4,15 @@
 
 import { ChatbotHelper } from '../../src/helpers/easy-setup';
 import { QueryGenerator } from '../../src/generator';
-import { SequelizeAdapter } from '../../src/adapters';
+import { PrismaAdapter } from '../../src/adapters';
 
 // Mock the adapters
-jest.mock('../../src/adapters/sequelize');
+jest.mock('../../src/adapters/prisma');
 jest.mock('../../src/generator');
 
 describe('ChatbotHelper', () => {
   let mockGenerator: jest.Mocked<QueryGenerator>;
-  let mockAdapter: jest.Mocked<SequelizeAdapter>;
+  let mockAdapter: jest.Mocked<PrismaAdapter>;
   let chatbot: ChatbotHelper;
 
   beforeEach(() => {

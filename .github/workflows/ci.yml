@@ -1,0 +1,222 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  # A new push to a pull request replaces the running check; runs on main finish.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  test:
+    name: Test (Node ${{ matrix.node-version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        # Supported release lines on 2026-10-26:
+        #   22 = Maintenance LTS (EOL 2027-04-30)
+        #   24 = Maintenance LTS (EOL 2028-04-30)
+        #   26 = Current, LTS from 2026-10-28 (EOL 2029-04-30)
+        node-version: ["22.x", "24.x", "26.x"]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: npm
+
+      # Install scripts run here (unlike in the publish workflow), so the native
+      # sqlite3 binding is built and the SQLite tests run instead of skipping.
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Type-check
+        run: npm run typecheck
+
+      - name: Build
+        run: npm run build
+
+      - name: Test
+        run: npm test -- --ci
+
+      - name: Verify registry signatures of dependencies
+        if: matrix.node-version == '24.x'
+        run: npm audit signatures
+
+  pack:
+    name: Pack
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24.x"
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Build
+        run: npm run build
+
+      - name: Check that public types do not expose SDK types
+        run: node scripts/check-dts.js
+
+      - name: Pack and check the contents
+        run: |
+          mkdir -p "$RUNNER_TEMP/package"
+          npm pack --ignore-scripts --json --pack-destination "$RUNNER_TEMP/package" > "$RUNNER_TEMP/pack.json"
+          # "files" in package.json is the whitelist; this catches build output
+          # that should not ship (compiled tests, stray directories).
+          cat > "$RUNNER_TEMP/check-pack.js" <<'EOF'
+          const [info] = JSON.parse(require('fs').readFileSync(process.argv[2], 'utf8'));
+          const allowed = /^(package\.json|LICENSE|NOTICE|[A-Z]+\.md|dist\/.+)$/;
+          const testLike = /(^|\/)(__tests__|__mocks__|tests?)\/|\.(test|spec)\./;
+          const bad = info.files.map((f) => f.path).filter((p) => !allowed.test(p) || testLike.test(p));
+          for (const f of info.files) console.log(String(f.size).padStart(8), f.path);
+          console.log(`${info.filename}: ${info.entryCount} files, ${info.unpackedSize} bytes unpacked`);
+          if (bad.length > 0) {
+            console.error(`::error::Unexpected files in the package: ${bad.join(', ')}`);
+            process.exit(1);
+          }
+          EOF
+          node "$RUNNER_TEMP/check-pack.js" "$RUNNER_TEMP/pack.json"
+          mv "$RUNNER_TEMP/package/"*.tgz "$RUNNER_TEMP/package/text-db-query-ai.tgz"
+
+      - name: Upload package
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: package
+          path: ${{ runner.temp }}/package/text-db-query-ai.tgz
+          if-no-files-found: error
+          retention-days: 7
+
+  consumer-smoke:
+    # Installs the packed tarball into an empty project the way a user would,
+    # then loads it with require() and import on every Node line that
+    # "engines" claims. Keep the lowest entry equal to the engines floor.
+    name: Consumer install (Node ${{ matrix.node-version }})
+    needs: pack
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: ["18.x", "20.x", "22.x", "24.x", "26.x"]
+    steps:
+      - name: Download package
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: package
+          path: ${{ runner.temp }}/package
+
+      - name: Setup Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ matrix.node-version }}
+          package-manager-cache: false
+
+      - name: Install the tarball into an empty project
+        run: |
+          mkdir "$RUNNER_TEMP/consumer"
+          cd "$RUNNER_TEMP/consumer"
+          npm init -y > /dev/null
+          npm install --no-audit --no-fund "$RUNNER_TEMP/package/text-db-query-ai.tgz"
+
+      - name: Use the package from CommonJS
+        working-directory: ${{ runner.temp }}/consumer
+        run: |
+          cat > smoke.cjs <<'EOF'
+          'use strict';
+          const assert = require('node:assert/strict');
+          const { createRequire } = require('node:module');
+          const pkg = require('text-db-query-ai');
+
+          for (const name of ['QueryGenerator', 'SecurityValidator', 'QuerySanitizer', 'SchemaAnalyzer',
+            'createQueryGenerator', 'createLLMProvider', 'ChatbotHelper', 'createFromDatabase', 'TextToQueryError']) {
+            assert.equal(typeof pkg[name], 'function', `missing export ${name}`);
+          }
+
+          // The SDKs may be loaded lazily, so load them here: an SDK that cannot
+          // run on this Node line must fail the job. Creating a client sends nothing.
+          const fromPackage = createRequire(require.resolve('text-db-query-ai'));
+          const OpenAI = fromPackage('openai');
+          const Anthropic = fromPackage('@anthropic-ai/sdk');
+          new (OpenAI.default || OpenAI)({ apiKey: 'sk-test' });
+          new (Anthropic.default || Anthropic)({ apiKey: 'sk-test' });
+
+          const database = {
+            databaseType: 'postgres',
+            tables: [{
+              name: 'orders',
+              columns: [
+                { name: 'id', type: 'integer' },
+                { name: 'user_id', type: 'integer' },
+                { name: 'total', type: 'decimal' },
+              ],
+            }],
+          };
+          for (const provider of ['openai', 'claude']) {
+            const generator = new pkg.QueryGenerator({ llm: { provider, apiKey: 'sk-test' }, database });
+            assert.match(generator.getSchema(), /orders/);
+          }
+
+          (async () => {
+            const user = { userId: 42, role: 'user' };
+            const sanitizer = new pkg.QuerySanitizer();
+            const query = sanitizer.addLimitIfMissing(
+              sanitizer.sanitize('SELECT id, total\n  FROM orders WHERE total > 10;'), 100);
+            assert.equal(sanitizer.validateSQLSyntax(query).valid, true);
+
+            const validator = new pkg.SecurityValidator({ allowedOperations: ['SELECT'], maxRowLimit: 100 });
+            const accepted = await validator.validate(query, user);
+            assert.deepEqual(accepted.errors, []);
+            const stacked = await validator.validate('SELECT id FROM orders; DELETE FROM orders', user);
+            assert.equal(stacked.valid, false);
+            assert.match(validator.addRowLevelSecurity('SELECT id FROM orders', user), /user_id = 42/);
+
+            console.log('CommonJS OK on', process.version);
+          })().catch((error) => {
+            console.error(error);
+            process.exit(1);
+          });
+          EOF
+          node smoke.cjs
+
+      - name: Use the package from ESM
+        working-directory: ${{ runner.temp }}/consumer
+        run: |
+          cat > smoke.mjs <<'EOF'
+          import assert from 'node:assert/strict';
+          import pkg, { QueryGenerator, SecurityValidator, QuerySanitizer, createLLMProvider } from 'text-db-query-ai';
+
+          for (const value of [QueryGenerator, SecurityValidator, QuerySanitizer, createLLMProvider]) {
+            assert.equal(typeof value, 'function');
+          }
+          // Node gives module.exports as the default import; its .default is the
+          // object the TypeScript default export compiles to.
+          assert.equal(pkg.QueryGenerator, QueryGenerator);
+          assert.equal(pkg.default.SecurityValidator, SecurityValidator);
+          console.log('ESM import OK on', process.version);
+          EOF
+          node smoke.mjs

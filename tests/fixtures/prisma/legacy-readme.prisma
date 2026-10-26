@@ -1,0 +1,7 @@
+// The sample model from the 0.0.1 docs. 0.0.1 parsed it into a table "user"
+// with columns id, email and "unique" (the real "name" column was lost).
+model User {
+  id    Int     @id @default(autoincrement())
+  email String  @unique
+  name  String?
+}

@@ -1,39 +1,42 @@
-# Source files
+# The "files" field in package.json is the whitelist for what gets published
+# (dist, README.md, LICENSE, NOTICE, plus package.json). npm ignores this root
+# .npmignore while "files" is set; it only applies if "files" is removed.
+# CI (the pack job) fails if the tarball contains anything else.
+
+# Sources and build config
 src/
+scripts/
 tsconfig.json
 jest.config.js
+*.tsbuildinfo
 
-# Examples
+# Docs and examples (README.md is the only documentation shipped)
+docs/
 examples/
+CONTRIBUTING.md
+SECURITY.md
 
 # Tests
 tests/
 coverage/
+__tests__/
 *.test.ts
 *.spec.ts
 test-*.js
 test-*.ts
 
-# Documentation (keep only README.md)
-CONTRIBUTING.md
-
-# Development files
-.env
-.env.example
+# Repository and tooling
+.git/
+.github/
+.gitignore
+.claude/
 .vscode/
 .idea/
-.claude/
 
-# Git
-.git/
-.gitignore
-
-# Logs
+# Secrets and local files
+.env
+.env.*
 *.log
-
-# OS files
+*.tgz
 .DS_Store
 Thumbs.db
-
-# Build artifacts
-*.tsbuildinfo
