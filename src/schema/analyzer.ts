@@ -218,7 +218,16 @@ export class SchemaAnalyzer {
 
       for (const column of table.columns || []) {
         const isRestricted = !restricted.isEmpty && restricted.match(column.name, table.name, table.schema) !== undefined;
-        block += `\n  ${this.renderColumn(column, dialect, pk.has(column.name), fks.get(column.name), isRestricted, withDescriptions, withSamples)}`;
+        const line = this.renderColumn(
+          column,
+          dialect,
+          pk.has(column.name),
+          fks.get(column.name),
+          isRestricted,
+          withDescriptions,
+          withSamples
+        );
+        block += `\n  ${line}`;
       }
       blocks.push(block);
     }
