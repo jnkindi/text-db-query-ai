@@ -266,7 +266,8 @@ describe('correction loop', () => {
     await generator.generateQuery('names');
     const feedback = provider.calls[1].prompt;
     expect(feedback).toContain('- Unknown column nickname: no table in the query ("User", orders) has it');
-    expect(feedback).toContain('- "User": id, email, "displayName", "signedUpAt", role, password');
+    // password is marked sensitive, so correction feedback never offers it.
+    expect(feedback).toContain('- "User": id, email, "displayName", "signedUpAt", role\n');
     expect(feedback).toContain('- orders: id, user_id, total, status');
   });
 
@@ -413,8 +414,12 @@ describe('correction loop', () => {
       const retry = makeGenerator([BAD, GOOD], { security });
       const result = await retry.generator.generateQuery('order totals');
       expect(result.query).toBe(BAD);
+      // total is restricted here, so the issue does not suggest it.
       expect(result.warnings).toEqual(
-        expect.arrayContaining([WARNING, 'The corrected query failed security validation, so the original answer is returned'])
+        expect.arrayContaining([
+          'Unknown column o.totl in table orders',
+          'The corrected query failed security validation, so the original answer is returned',
+        ])
       );
       expect(result.metadata).toMatchObject({ attempts: 2, unknownIdentifiers: ['orders.totl'] });
 

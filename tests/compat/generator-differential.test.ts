@@ -218,4 +218,57 @@ describe('generateQuery() on simple queries', () => {
     expect(now.metadata?.estimatedComplexity).toBe('low');
     expect(now.metadata?.tables).toEqual(before.metadata.tables);
   });
+
+  it('keeps a model limit with an explicit maxRowLimit: undefined, as 0.0.1 did (COMPAT-11)', async () => {
+    const c: Case = {
+      name: 'x',
+      answer: 'SELECT id, total FROM orders ORDER BY total DESC LIMIT 5000',
+      security: { requireUserContext: false, maxRowLimit: undefined },
+    };
+    const before = await legacyResult(c);
+    expect(before.query).toBe(c.answer);
+    expect((await currentResult(c)).query).toBe(before.query);
+  });
+});
+
+describe('0.0.1 provider and explanation behavior', () => {
+  const SQL = 'SELECT id FROM orders LIMIT 10';
+  const security: SecurityConfig = { requireUserContext: false };
+
+  /** A provider object with only generate(), assigned the way 0.0.1 users did, answering in turn. */
+  const scripted = (answers: string[]) => {
+    const queue = [...answers];
+    return {
+      generate: async () => queue.shift() as string,
+      validateApiKey: async () => true,
+      getDefaultModel: () => 'local',
+    };
+  };
+
+  async function both(answers: string[]) {
+    const config = { llm: { provider: 'openai' as const, apiKey: API_KEY }, database: README_SCHEMA, security };
+    const before = new legacy.QueryGenerator(config);
+    before.llmProvider = scripted(answers);
+    const now = new QueryGenerator(config);
+    (now as any).llmProvider = scripted(answers);
+    return {
+      before: await before.generateQueryWithExplanation('the question'),
+      now: await now.generateQueryWithExplanation('the question'),
+    };
+  }
+
+  it('works with a duck-typed provider that has only generate() (COMPAT-8)', async () => {
+    const { before, now } = await both([SQL, 'It lists ten order ids.']);
+    expect(now.query).toBe(before.query);
+    expect(now.explanation).toBe(before.explanation);
+  });
+
+  it.each([
+    'It returns one row per status, for example:\n```json\n{"status": "paid", "count": 3}\n```\nRows are sorted by count.',
+    'The query uses ```COUNT(*)``` to count orders per status.',
+    '```\nIt lists the ids of ten orders.\n```',
+  ])('returns the explanation as 0.0.1 did (COMPAT-13): %j', async (explanation) => {
+    const { before, now } = await both([SQL, explanation]);
+    expect(now.explanation).toBe(before.explanation);
+  });
 });

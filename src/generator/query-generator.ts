@@ -5,10 +5,12 @@ import {
   TextToQueryError,
   QueryOperation,
   IdentifierCheckMode,
+  ColumnSchema,
+  TableSchema,
 } from '../types';
 import { createLLMProvider, BaseLLMProvider } from '../providers';
-import { SecurityValidator, QuerySanitizer } from '../security';
-import { SchemaAnalyzer } from '../schema';
+import { SecurityValidator, QuerySanitizer, RestrictedColumns } from '../security';
+import { SchemaAnalyzer, SchemaRenderOptions } from '../schema';
 import { analyzeSql, SqlAnalysis, SqlDialect, SqlLexError, toSqlDialect, Token } from '../sql';
 import { IdentifierChecker, IdentifierInspection, IdentifierIssue } from './identifier-check';
 import {
@@ -33,6 +35,14 @@ const LOG_PREVIEW_LENGTH = 100;
 const SET_OPERATIONS: ReadonlySet<string> = new Set(['UNION', 'INTERSECT', 'EXCEPT', 'MINUS']);
 const JOIN_WORDS: ReadonlySet<string> = new Set(['JOIN', 'APPLY', 'STRAIGHT_JOIN']);
 const OPERATION_PREFIXES: QueryOperation[] = ['SELECT', 'INSERT', 'UPDATE', 'DELETE'];
+/** A "SQL:" label before the answer, which models copy from examples and prompts. No query starts with one. */
+const SQL_LABEL = /^\s*SQL\s*:\s*/i;
+/** One Markdown fence around the whole text: the marker, an optional info string, the body, the same marker. */
+const WRAPPING_FENCE = /^\s*(`{3,}|~{3,})[^\n`~]*\n([\s\S]*?)\n[ \t]*\1[ \t]*\s*$/;
+
+const DISCARDED_CORRECTION =
+  'A corrected query referenced more unknown identifiers than an earlier answer, so the earlier answer is returned';
+const FAILED_VALIDATION = 'The corrected query failed security validation, so the original answer is returned';
 
 /** A syntactically valid answer and its identifier check. */
 interface Candidate {
@@ -53,6 +63,8 @@ export class QueryGenerator {
   /** Rendered on first use and reused for every request (see getSystemPrompt). */
   private systemPrompt?: string;
   private identifierChecker?: IdentifierChecker;
+  /** restrictedColumns as the validator matches them, for correction feedback. */
+  private restrictedColumns: RestrictedColumns;
 
   constructor(config: TextToQueryConfig) {
     this.config = config;
@@ -65,6 +77,7 @@ export class QueryGenerator {
     });
     this.sanitizer = new QuerySanitizer(databaseType);
     this.schemaAnalyzer = new SchemaAnalyzer(config.database);
+    this.restrictedColumns = new RestrictedColumns(config.security ?? {});
 
     this.log('QueryGenerator initialized');
   }
@@ -138,11 +151,22 @@ export class QueryGenerator {
    * @param query - SQL to explain
    */
   async explainQuery(query: string): Promise<string> {
-    const explanation = await this.llmProvider.generateWithSystem(
-      EXPLANATION_SYSTEM_PROMPT,
-      buildExplanationPrompt(query)
-    );
-    return this.sanitizer.extractFromMarkdown(explanation);
+    const explanation = await this.complete(EXPLANATION_SYSTEM_PROMPT, buildExplanationPrompt(query));
+    // The explanation is prose: the SQL extractor would replace it with any fenced block
+    // inside it (a ```json example, an inline ```COUNT(*)```). Only a fence around all of it goes.
+    return stripWrappingFence(explanation);
+  }
+
+  /**
+   * One model call. A provider without generateWithSystem() (an object with
+   * only generate(), assigned in place of the provider as 0.0.1 allowed) gets
+   * the system prompt and the message joined, as BaseLLMProvider's default
+   * generateWithSystem() does.
+   */
+  private complete(system: string, prompt: string): Promise<string> {
+    const provider = this.llmProvider as Partial<BaseLLMProvider> & Pick<BaseLLMProvider, 'generate'>;
+    if (typeof provider.generateWithSystem === 'function') return provider.generateWithSystem(system, prompt);
+    return provider.generate(`${system}\n\n${prompt}`);
   }
 
   /**
@@ -185,7 +209,7 @@ export class QueryGenerator {
         attempts++;
         let raw: string;
         try {
-          raw = await this.llmProvider.generateWithSystem(system, feedback ? `${message}\n\n${feedback}` : message);
+          raw = await this.complete(system, feedback ? `${message}\n\n${feedback}` : message);
           if (typeof raw !== 'string') throw new Error('The LLM provider returned no text');
         } catch (error: any) {
           if (attempts === 1) throw error;
@@ -197,7 +221,7 @@ export class QueryGenerator {
         }
         this.log(`Received LLM response (attempt ${attempts}): ${raw.substring(0, LOG_PREVIEW_LENGTH)}...`);
 
-        const extracted = this.sanitizer.extractFromMarkdown(raw);
+        const extracted = this.sanitizer.extractFromMarkdown(raw).replace(SQL_LABEL, '');
         const reason = parseCannotAnswer(extracted) ?? parseCannotAnswer(raw);
         if (reason !== null) {
           if (candidates.length === 0) {
@@ -241,7 +265,11 @@ export class QueryGenerator {
         break;
       }
 
-      const final = candidates[candidates.length - 1];
+      // Never make a request worse: a correction with more unknown names than an
+      // earlier answer is discarded (equally good ones are kept, the latest wins).
+      const chosen = bestCandidate(candidates, candidates.length);
+      const final = candidates[chosen];
+      if (chosen < candidates.length - 1) notes.push(DISCARDED_CORRECTION);
       if (mode === 'strict' && final.inspection.issues.length > 0) {
         const issues = final.inspection.issues;
         throw new TextToQueryError(
@@ -254,17 +282,20 @@ export class QueryGenerator {
       try {
         return await this.finish(final, userInput, context, applyRowLevelSecurity, mode, attempts, notes);
       } catch (error: any) {
-        // A corrected query that fails validation: return the answer it corrected,
-        // as it would have been returned without the correction.
+        // A corrected query that fails validation: return an answer it corrected,
+        // as it would have been returned without the correction. Later candidates
+        // are corrections of the rejected one, so they are not used.
         if (!(error instanceof TextToQueryError) || error.code !== 'SECURITY_VALIDATION_FAILED' || mode !== 'retry') {
           throw error;
         }
-        for (let i = candidates.length - 2; i >= 0; i--) {
+        const fallbackNotes = [...notes, FAILED_VALIDATION];
+        for (let end = chosen; end > 0; ) {
+          const i = bestCandidate(candidates, end);
           try {
-            const fallbackNotes = [...notes, 'The corrected query failed security validation, so the original answer is returned'];
             return await this.finish(candidates[i], userInput, context, applyRowLevelSecurity, mode, attempts, fallbackNotes);
           } catch {
-            // try the one before
+            // try the best of the ones before it
+            end = i;
           }
         }
         throw error;
@@ -376,8 +407,26 @@ export class QueryGenerator {
     }
   }
 
+  /** How the model sees the schema: the same options as the system prompt. */
+  private renderOptions(): SchemaRenderOptions {
+    return { dialect: this.dialect, security: this.config.security };
+  }
+
+  /**
+   * The identifier checker. Its suggestions never offer what the model must
+   * not use: restricted columns (matched like the validator), columns marked
+   * sensitive, and tables allowedTables leaves out. Otherwise a correction
+   * turns an invented `password` into `password_hash`.
+   */
   private checker(): IdentifierChecker {
-    if (!this.identifierChecker) this.identifierChecker = new IdentifierChecker(this.config.database, this.dialect);
+    if (!this.identifierChecker) {
+      const restricted = this.restrictedColumns;
+      const shown = new Set(this.schemaAnalyzer.modelTables(this.renderOptions()).map((t) => t.table));
+      this.identifierChecker = new IdentifierChecker(this.config.database, this.dialect, {
+        hideColumn: (column, table) => isHiddenColumn(restricted, column, table),
+        hideTable: (table) => !shown.has(table),
+      });
+    }
     return this.identifierChecker;
   }
 
@@ -392,9 +441,17 @@ export class QueryGenerator {
     }
   }
 
-  /** Correction feedback with the real columns of the tables the problems concern. */
+  /**
+   * Correction feedback with the real columns of the tables the problems
+   * concern, leaving out restricted and sensitive columns and tables the
+   * model may not query, and the schema's tables when a table has no close
+   * match.
+   */
   private identifierFeedback(query: string, inspection: IdentifierInspection): string {
     const checker = this.checker();
+    const restricted = this.restrictedColumns;
+    const shown = this.schemaAnalyzer.modelTables(this.renderOptions());
+    const allowed = new Set(shown.map((t) => t.table));
     const names = new Set<string>();
     for (const issue of inspection.issues) {
       if (issue.kind === 'unknown_column' && issue.table === undefined) {
@@ -406,29 +463,42 @@ export class QueryGenerator {
     }
     const tables: TableColumns[] = [];
     for (const table of inspection.referencedTables) {
-      if (!names.has(table.name)) continue;
+      if (!names.has(table.name) || !allowed.has(table)) continue;
       tables.push({
         table: checker.display(table.name),
-        columns: (table.columns || []).map((c) => checker.display(c.name)),
+        columns: (table.columns || [])
+          .filter((c) => c && !isHiddenColumn(restricted, c, table))
+          .map((c) => checker.display(c.name)),
       });
     }
-    return buildIdentifierFeedback(query, inspection.issues.map((i) => i.message), tables);
+    // An invented table with nothing close in the schema: list the tables (cheap, and
+    // more useful than the bare "Unknown table").
+    const lost = inspection.issues.some((i) => i.kind === 'unknown_table' && !i.suggestions);
+    const schemaTables = lost ? shown.map((t) => t.name) : [];
+    return buildIdentifierFeedback(query, inspection.issues.map((i) => i.message), tables, schemaTables);
   }
 
   /**
    * With `security.maxRowLimit`, make sure a SELECT returns at most that many
    * rows (add a limit or lower a larger one). Without it, add nothing, as in
-   * 0.0.1, but lower an existing limit above the validator's default (1000)
-   * so the query does not fail validation.
+   * 0.0.1, but lower an existing limit above the validator's maximum so the
+   * query does not fail validation. That maximum is 1000 when the key is
+   * absent, and there is none when `maxRowLimit` is set to undefined: the
+   * validator spreads the config over its defaults, as 0.0.1 did.
    */
   private applyRowLimit(query: string, analysis: SqlAnalysis | undefined): string {
-    const maxRowLimit = this.config.security?.maxRowLimit;
+    const security = this.config.security;
+    const maxRowLimit = security?.maxRowLimit;
     if (maxRowLimit) {
       return this.sanitizer.enforceLimit(query, maxRowLimit);
     }
+    // Object spread copies own enumerable keys, so this is the key the validator sees.
+    const explicit = !!security && Object.prototype.propertyIsEnumerable.call(security, 'maxRowLimit');
+    const max = explicit ? maxRowLimit : DEFAULT_MAX_ROW_LIMIT;
+    if (typeof max !== 'number' || !(max > 0)) return query;
     const existing = analysis && analysis.statements.length > 0 ? largestRowLimit(analysis.statements[0]) : undefined;
-    if (existing !== undefined && existing > DEFAULT_MAX_ROW_LIMIT) {
-      return this.sanitizer.enforceLimit(query, DEFAULT_MAX_ROW_LIMIT);
+    if (existing !== undefined && existing > max) {
+      return this.sanitizer.enforceLimit(query, max);
     }
     return query;
   }
@@ -473,6 +543,29 @@ export class QueryGenerator {
   getExampleQueries(): string[] {
     return this.schemaAnalyzer.generateExampleQueries();
   }
+}
+
+/** Columns correction feedback never offers: restricted ones and ones marked sensitive. */
+function isHiddenColumn(restricted: RestrictedColumns, column: ColumnSchema, table: TableSchema): boolean {
+  if (column.sensitive === true || typeof column.name !== 'string') return true;
+  return !restricted.isEmpty && restricted.match(column.name, table.name, table.schema) !== undefined;
+}
+
+/** Index of the candidate before `end` with the fewest identifier issues; ties go to the latest. */
+function bestCandidate(candidates: Candidate[], end: number): number {
+  let best = end - 1;
+  for (let i = end - 2; i >= 0; i--) {
+    if (candidates[i].inspection.issues.length < candidates[best].inspection.issues.length) best = i;
+  }
+  return best;
+}
+
+/** The text inside one Markdown fence that wraps all of it, otherwise the text unchanged. */
+function stripWrappingFence(text: string): string {
+  if (typeof text !== 'string') return text;
+  const match = WRAPPING_FENCE.exec(text);
+  if (!match || match[2].includes(match[1].slice(0, 3))) return text;
+  return match[2].trim();
 }
 
 /** maxCorrectionAttempts as a non-negative integer (default 1). */

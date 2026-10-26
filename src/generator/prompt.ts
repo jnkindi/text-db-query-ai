@@ -34,6 +34,8 @@ const DIALECT_NAMES: Record<SqlDialect, string> = {
 
 /** The validator's default when security.allowedOperations is not set. */
 const DEFAULT_OPERATIONS: QueryOperation[] = ['SELECT'];
+/** Most table names listed in identifier feedback (the full schema is in the system prompt). */
+const MAX_LISTED_TABLES = 20;
 const WHITESPACE = /\s+/g;
 /** A closing tag inside untrusted text, which could end its block early. */
 const CLOSING_TAG = /<\/(?=[A-Za-z_])/g;
@@ -196,12 +198,23 @@ export interface TableColumns {
 
 /**
  * Feedback for a query that references unknown or wrongly quoted names: the
- * query, the exact problems (with suggestions) and the real columns of the
- * tables involved.
+ * query, the exact problems (with suggestions), the schema's table names when
+ * given (for an unknown table without a close match; at most 20 are listed)
+ * and the real columns of the tables involved.
  */
-export function buildIdentifierFeedback(sql: string, problems: string[], tables: TableColumns[]): string {
+export function buildIdentifierFeedback(
+  sql: string,
+  problems: string[],
+  tables: TableColumns[],
+  schemaTables: string[] = []
+): string {
   const lines = [previousAnswer(sql), 'That query does not match the schema:'];
   for (const p of problems) lines.push(`- ${p}`);
+  if (schemaTables.length > 0) {
+    const more = schemaTables.length - MAX_LISTED_TABLES;
+    const listed = schemaTables.slice(0, MAX_LISTED_TABLES).join(', ');
+    lines.push(`Tables in the schema: ${listed}${more > 0 ? `, ... (${more} more)` : ''}`);
+  }
   if (tables.length > 0) {
     lines.push('Columns of the tables involved:');
     for (const t of tables) lines.push(`- ${t.table}: ${t.columns.join(', ')}`);

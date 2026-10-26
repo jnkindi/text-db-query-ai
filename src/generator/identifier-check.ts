@@ -111,6 +111,27 @@ const QUERY_HEADS: ReadonlySet<string> = new Set(['SELECT', 'WITH', 'VALUES', 'T
 
 const MAX_SUGGESTIONS = 3;
 
+/**
+ * Options for IdentifierChecker.
+ */
+export interface IdentifierCheckerOptions {
+  /**
+   * Columns never offered to the model: left out of "did you mean"
+   * suggestions, "it exists in" hints and quoting fixes. QueryGenerator hides
+   * restricted and sensitive columns. A reference to a hidden column is still
+   * checked like any other.
+   */
+  hideColumn?: (column: ColumnSchema, table: TableSchema) => boolean;
+  /**
+   * Tables never offered to the model as "did you mean" suggestions or in
+   * "it exists in" hints. QueryGenerator hides the tables `allowedTables`
+   * leaves out. A query that names a hidden table is still checked (and a
+   * wrongly quoted reference to it still gets its quoting fix: the table is
+   * already in the query, and the validator decides whether it may be).
+   */
+  hideTable?: (table: TableSchema) => boolean;
+}
+
 interface TableEntry {
   table: TableSchema;
   /** Lowercased table name. */
@@ -119,6 +140,10 @@ interface TableEntry {
   schemaKey?: string;
   /** Lowercased column name -> columns with that name (usually one). */
   columns: Map<string, ColumnSchema[]>;
+  /** Never suggested (IdentifierCheckerOptions.hideTable). */
+  hidden: boolean;
+  /** Columns never suggested (IdentifierCheckerOptions.hideColumn). */
+  hiddenColumns: ReadonlySet<ColumnSchema>;
 }
 
 /** How a qualifier (`x` in `x.col`) resolves. */
@@ -130,9 +155,19 @@ type Source = TableEntry | 'opaque';
  */
 export class IdentifierChecker {
   private byName?: Map<string, TableEntry[]>;
+  /** Names of the tables that may be suggested. */
   private tableNames?: string[];
 
-  constructor(private readonly schema: DatabaseSchema, private readonly dialect: SqlDialect) {}
+  /**
+   * @param schema - Schema the queries should use
+   * @param dialect - SQL dialect of the queries
+   * @param options - Columns and tables never to suggest
+   */
+  constructor(
+    private readonly schema: DatabaseSchema,
+    private readonly dialect: SqlDialect,
+    private readonly options: IdentifierCheckerOptions = {}
+  ) {}
 
   /**
    * Issues in `sql`. Returns an empty list when the query cannot be lexed.
@@ -239,26 +274,31 @@ export class IdentifierChecker {
     if (this.byName) return this.byName;
     const byName = new Map<string, TableEntry[]>();
     const names: string[] = [];
+    const { hideColumn, hideTable } = this.options;
     for (const table of this.schema.tables || []) {
       if (!table || typeof table.name !== 'string') continue;
       const columns = new Map<string, ColumnSchema[]>();
+      const hiddenColumns = new Set<ColumnSchema>();
       for (const column of table.columns || []) {
         if (!column || typeof column.name !== 'string') continue;
         const key = column.name.toLowerCase();
         const list = columns.get(key);
         if (list) list.push(column);
         else columns.set(key, [column]);
+        if (hideColumn && hideColumn(column, table)) hiddenColumns.add(column);
       }
       const entry: TableEntry = {
         table,
         key: table.name.toLowerCase(),
         schemaKey: table.schema ? table.schema.toLowerCase() : undefined,
         columns,
+        hidden: !!hideTable && hideTable(table),
+        hiddenColumns,
       };
       const list = byName.get(entry.key);
       if (list) list.push(entry);
       else byName.set(entry.key, [entry]);
-      names.push(table.name);
+      if (!entry.hidden) names.push(table.name);
     }
     this.byName = byName;
     this.tableNames = names;
@@ -282,9 +322,10 @@ export class IdentifierChecker {
     const candidates =
       schemaKey === undefined ? byName : byName.filter((e) => e.schemaKey === undefined || e.schemaKey === schemaKey);
     if (candidates.length === 0) {
+      const sameName = byName.filter((e) => !e.hidden);
       const suggestions =
-        byName.length > 0
-          ? byName.map((e) => (e.table.schema ? `${e.table.schema}.${e.table.name}` : e.table.name))
+        sameName.length > 0
+          ? sameName.map((e) => (e.table.schema ? `${e.table.schema}.${e.table.name}` : e.table.name))
           : closestNames(ref.name, this.tableNames!);
       issues.add({
         kind: 'unknown_table',
@@ -350,8 +391,10 @@ export class IdentifierChecker {
       if (this.dialect !== 'postgres' || !this.schema.exactNames) return;
       const folded = quoted ? name : key;
       if (list.some((c) => c.name === folded)) return;
-      if (!match) {
-        match = list[0];
+      // A hidden column is not offered as the quoting fix: the reference is reported as unknown.
+      const shown = match ? undefined : list.find((c) => !entry.hiddenColumns.has(c));
+      if (shown) {
+        match = shown;
         owner = entry;
       }
     }
@@ -374,7 +417,9 @@ export class IdentifierChecker {
     }
 
     const pool: string[] = [];
-    for (const entry of tables) for (const list of entry.columns.values()) for (const c of list) pool.push(c.name);
+    for (const entry of tables) {
+      for (const list of entry.columns.values()) for (const c of list) if (!entry.hiddenColumns.has(c)) pool.push(c.name);
+    }
     const suggestions = closestNames(name, pool);
     let message: string;
     if (qualified) {
@@ -412,12 +457,14 @@ export class IdentifierChecker {
     return issue;
   }
 
-  /** Schema tables outside `exclude` that have a column named `key` (lowercase). */
+  /** Schema tables outside `exclude` that have a column named `key` (lowercase), hidden ones left out. */
   private tablesWithColumn(key: string, exclude: TableEntry[]): string[] {
     const found: string[] = [];
     for (const list of this.byName!.values()) {
       for (const entry of list) {
-        if (exclude.indexOf(entry) === -1 && entry.columns.has(key)) found.push(entry.table.name);
+        if (entry.hidden || exclude.indexOf(entry) !== -1) continue;
+        const columns = entry.columns.get(key);
+        if (columns && columns.some((c) => !entry.hiddenColumns.has(c))) found.push(entry.table.name);
         if (found.length >= MAX_SUGGESTIONS) return found;
       }
     }
