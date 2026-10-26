@@ -1,13 +1,13 @@
 /**
  * Row-level security (design doc 5.4): the text addRowLevelSecurity produces,
- * the values it refuses, and the rows the rewritten SQL returns on real
- * SQLite and Postgres databases.
+ * the values it refuses, and the rows the rewritten SQL returns on SQLite
+ * (Postgres: tests/integration/pglite.test.ts).
  */
 
 import { SecurityValidator } from '../../src/security/validator';
-import { DatabaseType, TextToQueryError, UserContext } from '../../src/types';
+import { TextToQueryError, UserContext } from '../../src/types';
 import { rlsCases, invalidUserIds, RlsCase, InvalidUserIdCase } from '../fixtures/security-rls';
-import { startPGlite, PGliteProcess } from '../integration/helpers/pglite-process';
+import { ISOLATION_SETUP, expectIsolation } from '../fixtures/rls-isolation';
 
 jest.setTimeout(60000);
 
@@ -74,52 +74,6 @@ describe('addRowLevelSecurity refuses unsafe values', () => {
   });
 });
 
-/** Queries a model might produce; each must return only the current user's rows once filtered. */
-const ISOLATION_QUERIES = [
-  'SELECT * FROM orders',
-  "SELECT * FROM orders WHERE status = 'paid' OR status = 'refunded'",
-  'SELECT * FROM orders WHERE user_id = 2',
-  'SELECT * FROM orders WHERE user_id = 1 OR 1=1',
-  'SELECT * FROM orders WHERE total > 0 OR user_id = 1',
-  'SELECT * FROM orders WHERE user_id IS NOT NULL',
-  "SELECT * FROM orders WHERE note = 'user_id = 1'",
-  'SELECT user_id, status, COUNT(*) AS n FROM orders GROUP BY user_id, status HAVING COUNT(*) > 0 ORDER BY status',
-  'SELECT user_id, id, ROW_NUMBER() OVER (ORDER BY id) AS rn FROM orders ORDER BY id LIMIT 10',
-  'SELECT user_id FROM orders UNION ALL SELECT user_id FROM orders',
-  'SELECT * FROM (SELECT * FROM orders) o',
-  'WITH x AS (SELECT * FROM orders WHERE user_id = 2) SELECT * FROM x',
-  'SELECT * FROM orders WHERE id IN (SELECT id FROM orders WHERE user_id = 1)',
-];
-
-interface Executor {
-  run(sql: string): Promise<Array<Record<string, unknown>>>;
-}
-
-async function expectIsolation(db: Executor, databaseType: DatabaseType): Promise<void> {
-  const v = new SecurityValidator({ enableRowLevelSecurity: true }, { databaseType });
-  for (const q of ISOLATION_QUERIES) {
-    const filtered = v.addRowLevelSecurity(q, user(1));
-    const rows = await db.run(filtered);
-    const others = rows.map((r) => Number(r.user_id)).filter((id) => id !== 1);
-    expect({ q, filtered, others }).toEqual({ q, filtered, others: [] });
-  }
-  // The unfiltered query does see the other user, so the checks above are meaningful
-  expect((await db.run('SELECT * FROM orders')).some((r) => Number(r.user_id) === 2)).toBe(true);
-  expect((await db.run(v.addRowLevelSecurity("SELECT * FROM orders WHERE status = 'paid' OR status = 'refunded'", user(1)))).length).toBe(1);
-  // String ids: quotes are escaped, so the injection attempt matches nothing
-  const s = new SecurityValidator({ enableRowLevelSecurity: true, rowLevelSecurityColumn: 'owner' }, { databaseType });
-  expect(await db.run(s.addRowLevelSecurity('SELECT * FROM docs', user("x' OR '1'='1")))).toEqual([]);
-  const mine = await db.run(s.addRowLevelSecurity('SELECT * FROM docs ORDER BY id', user("O'Brien")));
-  expect(mine.map((r) => r.owner)).toEqual(["O'Brien"]);
-}
-
-const SETUP = [
-  'CREATE TABLE orders (id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL, status TEXT, total REAL, note TEXT)',
-  "INSERT INTO orders VALUES (1, 1, 'paid', 10, NULL), (2, 2, 'paid', 20, NULL), (3, 2, 'refunded', 5, 'user_id = 1'), (4, 1, 'new', 0, 'user_id = 1')",
-  'CREATE TABLE docs (id INTEGER PRIMARY KEY, owner TEXT NOT NULL)',
-  "INSERT INTO docs VALUES (1, 'O''Brien'), (2, 'x'), (3, 'someone')",
-];
-
 function loadSqlite3(): any {
   try {
     // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -138,7 +92,7 @@ describeSqlite('row isolation on SQLite (sqlite3, in memory)', () => {
 
   beforeAll(async () => {
     db = new sqlite3.Database(':memory:');
-    for (const s of SETUP) await all(s);
+    for (const s of ISOLATION_SETUP) await all(s);
   });
   afterAll(() => new Promise<void>((resolve) => db.close(() => resolve())));
 
@@ -155,24 +109,4 @@ describeSqlite('row isolation on SQLite (sqlite3, in memory)', () => {
   });
 });
 
-/*
- * Opt-in (PGLITE_RLS=1): a second PGlite process next to the one in
- * tests/integration/pglite.test.ts slows the parallel full run enough to push
- * the wall-clock benchmark in tests/sql/performance.test.ts over its budget.
- */
-const describePostgres = process.env.PGLITE_RLS === '1' ? describe : describe.skip;
-
-describePostgres('row isolation on Postgres (PGlite; set PGLITE_RLS=1)', () => {
-  let pg: PGliteProcess;
-  beforeAll(async () => {
-    pg = startPGlite();
-    for (const s of SETUP) await pg.exec(s);
-  });
-  afterAll(async () => {
-    await pg.close();
-  });
-
-  it('every filtered query returns only user 1', async () => {
-    await expectIsolation({ run: async (sql) => (await pg.query(sql)).rows }, 'postgres');
-  });
-});
+// The same isolation checks run on Postgres in tests/integration/pglite.test.ts, which owns the PGlite process.

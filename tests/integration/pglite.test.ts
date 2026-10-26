@@ -1,11 +1,25 @@
 /**
- * Postgres introspection against a real server: PGlite (Postgres compiled to
- * WASM). It runs in a child process (see helpers/pglite-server.js) and is used
- * through the same `query(sql, params) -> { rows }` contract as pg and PGlite.
+ * Postgres against a real server: PGlite (Postgres compiled to WASM), for
+ * introspection and for the rows row-level security lets through. It runs in
+ * one child process (see helpers/pglite-server.js), shared by every test here,
+ * and is used through the same `query(sql, params) -> { rows }` contract as pg.
  */
 
 import { DatabaseIntrospectionAdapter, PrismaAdapter } from '../../src/adapters';
+import { SecurityValidator } from '../../src/security';
 import { DatabaseSchema, TableSchema } from '../../src/types';
+import {
+  COVERAGE_CONFIG,
+  COVERAGE_KEEPS_MEANING,
+  COVERAGE_LEAKS,
+  coverageSchema,
+  coverageSetup,
+  Executor,
+  expectIsolation,
+  expectSameRows,
+  ISOLATION_SETUP,
+  POSTGRES_COVERAGE_LEAKS,
+} from '../fixtures/rls-isolation';
 import { startPGlite, PGliteProcess } from './helpers/pglite-process';
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -284,6 +298,45 @@ describe('PGlite (Postgres 18)', () => {
         ['ada@example.com']
       );
       expect(rows).toEqual([{ id: BigInt(1), displayName: 'Ada' }]);
+    });
+  });
+
+  describe('row-level security on Postgres', () => {
+    // Each data set lives in its own schema of the shared database; a query runs
+    // with search_path pointing at it, then public is restored for the other tests.
+    const inSchema = (schema: string): Executor => ({
+      run: async (sql) => {
+        await db.exec(`SET search_path TO ${schema}`);
+        try {
+          return (await db.query(sql)).rows;
+        } finally {
+          await db.exec('SET search_path TO public');
+        }
+      },
+    });
+    const load = async (schema: string, statements: string[]) => {
+      await db.exec(`CREATE SCHEMA ${schema}; SET search_path TO ${schema}; ${statements.join('; ')}; SET search_path TO public`);
+    };
+
+    beforeAll(async () => {
+      await load('rls_isolation', ISOLATION_SETUP);
+      await load('rls_full', coverageSetup());
+      await load('rls_own', coverageSetup(1));
+    });
+
+    it('every filtered query returns only user 1', async () => {
+      await expectIsolation(inSchema('rls_isolation'), 'postgres');
+    });
+
+    const withSchema = new SecurityValidator(COVERAGE_CONFIG, { databaseType: 'postgres', schema: coverageSchema('postgres') });
+    const withoutSchema = new SecurityValidator(COVERAGE_CONFIG, { databaseType: 'postgres' });
+
+    it.each([...COVERAGE_LEAKS, ...POSTGRES_COVERAGE_LEAKS, ...COVERAGE_KEEPS_MEANING])('with a schema: %s', async (_name, sql) => {
+      await expectSameRows(withSchema, inSchema('rls_full'), inSchema('rls_own'), sql, true);
+    });
+
+    it.each([...COVERAGE_LEAKS, ...POSTGRES_COVERAGE_LEAKS])('without a schema: %s', async (_name, sql) => {
+      await expectSameRows(withoutSchema, inSchema('rls_full'), inSchema('rls_own'), sql, false);
     });
   });
 });
