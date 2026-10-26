@@ -135,3 +135,32 @@ describe('generic dialect: constructs that databases read differently', () => {
     expect(tableNames('WITH Recent AS (SELECT 1 AS x) SELECT * FROM Recent', 'generic')).toEqual([]);
   });
 });
+
+describe('SQLite names written as single-quoted strings', () => {
+  // SQLite's grammar accepts a string where it expects a name: FROM 'accounts', a.'password', AS 'x'
+  const columns = (sql: string, dialect: SqlDialect) =>
+    analyzeSql(sql, dialect).columns.map((c) => (c.qualifier ? `${c.qualifier}.${c.name}` : c.name));
+
+  it.each(['sqlite', 'generic'] as const)('reads them as tables and columns in %s', (dialect) => {
+    expect(tableNames("SELECT * FROM 'accounts'", dialect)).toEqual(['accounts']);
+    expect(tableNames("SELECT * FROM orders, 'secrets' s", dialect)).toEqual(['orders', 'secrets']);
+    expect(tableNames("SELECT o.id FROM orders o JOIN 'notes' n ON n.id = o.id", dialect)).toEqual(['orders', 'notes']);
+    expect(tableNames("SELECT (SELECT body FROM 'notes' x LIMIT 1) FROM orders", dialect)).toEqual(['notes', 'orders']);
+    expect(tableNames("SELECT * FROM 'main'.'accounts'", dialect)).toEqual(['accounts']);
+    expect(tableNames("INSERT INTO 'archive' SELECT * FROM orders", dialect)).toEqual(['archive', 'orders']);
+    expect(tableNames("UPDATE 'orders' SET total = 1", dialect)).toEqual(['orders']);
+    expect(tableNames("DELETE FROM 'orders' WHERE id = 1", dialect)).toEqual(['orders']);
+    expect(columns("SELECT a.'password' FROM accounts a", dialect)).toContain('a.password');
+    expect(analyzeSql("SELECT 'it''s' FROM 'x''y'", dialect).tables[0].name).toBe("x'y");
+  });
+
+  it.each(['sqlite', 'generic'] as const)('keeps string values as strings in %s', (dialect) => {
+    expect(columns("SELECT 'password' AS label FROM accounts WHERE note = 'password'", dialect)).not.toContain('password');
+    expect(tableNames("SELECT value FROM json_each('[1, 2]')", dialect)).toEqual([]);
+    expect(tableNames("SELECT id FROM orders WHERE status IN ('paid', 'new') ORDER BY 'x'", dialect)).toEqual(['orders']);
+  });
+
+  it('does not read them as names in postgres, where they are string literals', () => {
+    expect(tableNames("SELECT * FROM 'accounts'", 'postgres')).toEqual([]);
+  });
+});

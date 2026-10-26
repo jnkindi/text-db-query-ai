@@ -148,6 +148,14 @@ export const COVERAGE_LEAKS: Array<readonly [string, string]> = [
   ['a filter on one joined table', 'SELECT o.id AS oid, x.id AS xid FROM orders o JOIN orders x ON 1 = 1 WHERE x.user_id = 1'],
 ];
 
+/** SQLite-only syntax: table names written as single-quoted strings. */
+export const SQLITE_COVERAGE_LEAKS: Array<readonly [string, string]> = [
+  ['single-quoted table in a subquery', "SELECT o.id, (SELECT body FROM 'notes' x WHERE x.user_id = 2 LIMIT 1) AS leak FROM orders o"],
+  ['single-quoted table in an aggregate subquery', "SELECT id, (SELECT SUM(total) FROM 'orders') AS s FROM orders"],
+  ['single-quoted main table', "SELECT id, user_id FROM 'orders'"],
+  ['single-quoted joined table', "SELECT n.id, n.body FROM orders o JOIN 'notes' n ON 1 = 1"],
+];
+
 /** Postgres-only syntax: a column-renaming alias and LATERAL. */
 export const POSTGRES_COVERAGE_LEAKS: Array<readonly [string, string]> = [
   ['column-renaming alias in a subquery', 'SELECT id, (SELECT SUM(t) FROM orders AS o(a, b, c, t)) AS s FROM orders'],

@@ -488,3 +488,32 @@ describe('SecurityValidatorOptions', () => {
     expect((await check('SELECT 1--x', {}, { databaseType: 'mongodb' })).errors).toEqual(['Query contains dangerous patterns: --']);
   });
 });
+
+describe('SQLite names written as single-quoted strings', () => {
+  // SQLite runs FROM 'accounts' as the table accounts, and a.'password' as the column
+  const sqliteSchema: DatabaseSchema = { ...schema, databaseType: 'sqlite' };
+
+  it.each(['sqlite', undefined] as const)('are checked against allowedTables (%s)', async (databaseType) => {
+    const cfg: SecurityConfig = { allowedTables: ['orders'], allowUnion: true };
+    for (const sql of [
+      "SELECT * FROM 'secrets' LIMIT 1",
+      "SELECT (SELECT token FROM 'secrets' LIMIT 1) AS t, id FROM orders LIMIT 1",
+      "SELECT id FROM orders UNION SELECT token FROM 'secrets' LIMIT 1",
+    ]) {
+      expect({ sql, errors: (await check(sql, cfg, { databaseType })).errors }).toEqual({
+        sql,
+        errors: ['Query accesses unauthorized tables: secrets'],
+      });
+    }
+  });
+
+  it.each(['sqlite', undefined] as const)('are checked against restrictedColumns (%s)', async (databaseType) => {
+    const cfg: SecurityConfig = { restrictedColumns: ['password'] };
+    for (const sql of ["SELECT * FROM 'users' LIMIT 1", "SELECT u.* FROM 'users' u LIMIT 1", "SELECT u.'password' FROM users u LIMIT 1"]) {
+      expect({ sql, errors: (await check(sql, cfg, { databaseType, schema: sqliteSchema })).errors.join() }).toEqual({
+        sql,
+        errors: expect.stringContaining('Query accesses restricted columns: password'),
+      });
+    }
+  });
+});

@@ -13,6 +13,7 @@ import {
   COVERAGE_KEEPS_MEANING,
   COVERAGE_LEAKS,
   COVERAGE_USER as USER,
+  SQLITE_COVERAGE_LEAKS,
   coverageSchema,
   coverageSetup,
   Executor,
@@ -53,7 +54,7 @@ describeSqlite('row-level security covers every read (SQLite)', () => {
   describe('with a schema', () => {
     const validator = new SecurityValidator(CONFIG, { databaseType: 'sqlite', schema: SCHEMA });
 
-    it.each([...COVERAGE_LEAKS, ...COVERAGE_KEEPS_MEANING])('%s', async (_name, sql) => {
+    it.each([...COVERAGE_LEAKS, ...SQLITE_COVERAGE_LEAKS, ...COVERAGE_KEEPS_MEANING])('%s', async (_name, sql) => {
       await expectSameRows(validator, fullDb, ownDb, sql, true);
     });
 
@@ -119,7 +120,7 @@ describeSqlite('row-level security covers every read (SQLite)', () => {
   describe('without a schema', () => {
     const validator = new SecurityValidator(CONFIG, { databaseType: 'sqlite' });
 
-    it.each(COVERAGE_LEAKS)('%s', async (_name, sql) => {
+    it.each([...COVERAGE_LEAKS, ...SQLITE_COVERAGE_LEAKS])('%s', async (_name, sql) => {
       await expectSameRows(validator, fullDb, ownDb, sql, false);
     });
 

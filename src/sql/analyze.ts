@@ -293,6 +293,55 @@ interface CteScope {
  * order; each assigns roles to tokens so later passes (aliases, functions,
  * qualified columns, bare candidates) skip what earlier ones explained.
  */
+/** Words that start a list of table items (FROM a, b JOIN c ...). */
+const TABLE_LIST_START = set('FROM JOIN INTO UPDATE TABLE USING');
+/** Words that end a list of table items on its level. */
+const TABLE_LIST_END = set(`
+  WHERE GROUP ORDER HAVING LIMIT OFFSET ON SET VALUES SELECT UNION INTERSECT EXCEPT WINDOW
+  RETURNING FETCH DEFAULT INDEXED NOT
+`);
+
+/**
+ * SQLite reads a single-quoted string as a name wherever its grammar expects
+ * one (`FROM 'accounts'`, `a.'password'`, `AS 'x'`), so the analysis must read
+ * it that way too, or the table and its columns go unchecked. In the generic
+ * dialect these forms are errors on the other databases, so reading them as
+ * names is safe. Such strings are retagged as quoted identifiers, in place.
+ */
+function retagStringNames(t: Token[]): void {
+  let depth = 0;
+  let listDepth = -1;
+  for (let i = 0; i < t.length; i++) {
+    const tok = t[i];
+    if (tok.type === 'punct') {
+      if (tok.value === '(' || tok.value === '[') {
+        depth++;
+      } else if (tok.value === ')' || tok.value === ']') {
+        depth--;
+        if (listDepth > depth) listDepth = -1;
+      }
+      continue;
+    }
+    if (tok.type === 'word') {
+      if (TABLE_LIST_START.has(tok.value)) listDepth = depth;
+      else if (listDepth === depth && TABLE_LIST_END.has(tok.value)) listDepth = -1;
+      continue;
+    }
+    // Only plain '...' strings: X'..' blobs and other prefixed forms stay values
+    if (tok.type !== 'string' || tok.text.charCodeAt(0) !== 39 /* ' */) continue;
+    const prev = t[i - 1];
+    const next = t[i + 1];
+    const inList =
+      listDepth === depth &&
+      !!prev &&
+      (prev.type === 'word' || prev.type === 'quoted' || (prev.type === 'punct' && prev.value === ','));
+    if (inList || isPunct(prev, '.') || isPunct(next, '.') || isWord(prev, 'AS')) {
+      tok.type = 'quoted';
+      tok.value = tok.text.slice(1, -1).replace(/''/g, "'");
+    }
+  }
+}
+
 class StatementAnalyzer {
   private readonly n: number;
   /** Index of the matching `)`/`]` for an opener and vice versa; -1 if unbalanced. */
@@ -333,6 +382,7 @@ class StatementAnalyzer {
     private readonly dialect: SqlDialect,
     private readonly out: Collector
   ) {
+    if (dialect === 'sqlite' || dialect === 'generic') retagStringNames(t);
     const n = t.length;
     this.n = n;
     this.pair = new Int32Array(n).fill(-1);
