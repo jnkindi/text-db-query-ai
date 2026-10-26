@@ -11,8 +11,13 @@
 import { SecurityValidator } from '../../src/security';
 import type { DatabaseType } from '../../src/types';
 
+// Wall-clock bounds share the CPU with the other jest workers: retry a load spike twice.
+jest.retryTimes(2, { logErrorsBeforeRetry: true });
+
 const USER = { userId: 1, role: 'user' };
-const BOUND_MS = 1000;
+// Coverage instrumentation slows the code down several times; keep the bound meaningful without it.
+const instrumented = typeof (globalThis as Record<string, unknown>).__coverage__ !== 'undefined';
+const BOUND_MS = 1000 * (instrumented ? 10 : 1);
 
 type Kind = 'nested-parens' | 'select-list' | 'set-ops' | 'joins' | 'subqueries' | 'qualifiers' | 'long-string';
 

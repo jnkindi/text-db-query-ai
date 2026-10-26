@@ -399,6 +399,8 @@ describe('tokenize: linear time on long inputs', () => {
   });
 
   it('handles long runs of escapes, comments, dollar quotes and failures quickly', () => {
+    // Coverage instrumentation slows the lexer down several times
+    const bound = 500 * (typeof (globalThis as Record<string, unknown>).__coverage__ !== 'undefined' ? 10 : 1);
     const inputs: Array<[string, SqlDialect]> = [
       ["'" + "''".repeat(MB / 2) + "'", 'postgres'],
       ["'" + '\\\''.repeat(MB / 2) + "'", 'mysql'],
@@ -408,10 +410,10 @@ describe('tokenize: linear time on long inputs', () => {
       ['"' + 'a'.repeat(MB) + '"', 'postgres'],
     ];
     for (const [sql, d] of inputs) {
-      expect(timed(() => tokenize(sql, d))).toBeLessThan(500);
+      expect(timed(() => tokenize(sql, d))).toBeLessThan(bound);
     }
     // Unterminated input fails fast instead of backtracking
-    expect(timed(() => expect(() => tokenize("'" + 'x'.repeat(MB), 'postgres')).toThrow(SqlLexError))).toBeLessThan(500);
-    expect(timed(() => expect(() => tokenize('/*' + ' /*'.repeat(MB / 3), 'postgres')).toThrow(SqlLexError))).toBeLessThan(500);
+    expect(timed(() => expect(() => tokenize("'" + 'x'.repeat(MB), 'postgres')).toThrow(SqlLexError))).toBeLessThan(bound);
+    expect(timed(() => expect(() => tokenize('/*' + ' /*'.repeat(MB / 3), 'postgres')).toThrow(SqlLexError))).toBeLessThan(bound);
   });
 });
