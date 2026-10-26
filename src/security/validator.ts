@@ -15,6 +15,7 @@ import {
   isBlockedFunction,
   formatIdentifier,
   sqlReadings,
+  SQL_KEYWORDS,
   SqlLexError,
   type LexOptions,
   type SqlAnalysis,
@@ -146,6 +147,8 @@ interface ColumnRule {
 interface Rules {
   /** Bare restricted column (uppercased) -> the configured entry. */
   restrictedBare: Map<string, string>;
+  /** restrictedColumnsMatch 'contains' (default): lowercased bare entries and the entry as configured. */
+  restrictedFragments: Array<[string, string]>;
   /** Uppercased column -> table-specific rules for it. */
   byColumn: Map<string, ColumnRule[]>;
   restrictedOrder: string[];
@@ -947,6 +950,14 @@ export class SecurityValidator {
   private findRestrictedColumns(ctx: QueryContext): { restricted: string[]; sensitive: string[] } {
     const rules = this.rules;
     if (rules.restrictedBare.size === 0 && rules.byColumn.size === 0) return EMPTY_COLUMNS;
+    const addBare = (name: string, keyword: boolean): void => {
+      const bare = rules.restrictedBare.get(name.toUpperCase());
+      if (bare !== undefined) restricted.add(bare);
+      // A fragment never matches a keyword (`or` is not in ORDER), only names
+      if (keyword) return;
+      const lower = name.toLowerCase();
+      for (const [fragment, entry] of rules.restrictedFragments) if (lower.includes(fragment)) restricted.add(entry);
+    };
     const restricted = new Set<string>();
     const sensitive = new Set<string>();
     const flag = (rule: ColumnRule): void => {
@@ -966,9 +977,9 @@ export class SecurityValidator {
         if (isPunctAt(t, i + 1, '(') || isPunctAt(t, i + 1, '.')) continue; // function or qualifier
         const prev = t[i - 1];
         if (prev && prev.type === 'operator' && prev.value === '::') continue; // type name
-        const column = (tok.type === 'quoted' ? tok.value : tok.text).toUpperCase();
-        const bare = rules.restrictedBare.get(column);
-        if (bare !== undefined) restricted.add(bare);
+        const written = tok.type === 'quoted' ? tok.value : tok.text;
+        addBare(written, tok.type === 'word' && SQL_KEYWORDS.has(tok.value));
+        const column = written.toUpperCase();
         const specific = rules.byColumn.get(column);
         if (specific) {
           const qualifier = isPunctAt(t, i - 1, '.') && isNameToken(t[i - 2]) ? nameOf(t[i - 2]) : undefined;
@@ -982,9 +993,8 @@ export class SecurityValidator {
       for (const ref of this.expandedTables(ctx)) {
         for (const table of this.schemaTablesFor(ref)) {
           for (const col of table.columns) {
+            addBare(col.name, false);
             const column = col.name.toUpperCase();
-            const bare = rules.restrictedBare.get(column);
-            if (bare !== undefined) restricted.add(bare);
             const specific = rules.byColumn.get(column);
             if (specific) for (const rule of specific) if (this.tableMatches(rule, ref)) flag(rule);
           }
@@ -1223,6 +1233,8 @@ export class SecurityValidator {
 
   private compileRules(): Rules {
     const restrictedBare = new Map<string, string>();
+    const restrictedFragments: Array<[string, string]> = [];
+    const contains = this.config.restrictedColumnsMatch !== 'exact';
     const byColumn = new Map<string, ColumnRule[]>();
     const restrictedOrder: string[] = [];
     const sensitiveOrder: string[] = [];
@@ -1242,6 +1254,7 @@ export class SecurityValidator {
       if (dot < 0) {
         const key = entry.toUpperCase();
         if (!restrictedBare.has(key)) restrictedBare.set(key, raw);
+        if (contains) restrictedFragments.push([entry.toLowerCase(), raw]);
         continue;
       }
       const tablePart = entry.slice(0, dot).split('.');
@@ -1282,7 +1295,7 @@ export class SecurityValidator {
       }
     }
 
-    return { restrictedBare, byColumn, restrictedOrder, sensitiveOrder, allowedTables, schemaTables };
+    return { restrictedBare, restrictedFragments, byColumn, restrictedOrder, sensitiveOrder, allowedTables, schemaTables };
   }
 
   /** The configured RLS column as a single identifier token. */
@@ -1562,6 +1575,8 @@ export class SecurityValidator {
       .filter((name) => {
         const key = name.toUpperCase();
         if (this.rules.restrictedBare.has(key)) return false;
+        const lower = name.toLowerCase();
+        if (this.rules.restrictedFragments.some(([fragment]) => lower.includes(fragment))) return false;
         return !(this.rules.byColumn.get(key) ?? []).some((rule) => this.tableMatches(rule, ref));
       });
     if (columns.length === 0) return '*';

@@ -130,8 +130,39 @@ describe('allowedTables', () => {
 });
 
 describe('restrictedColumns', () => {
-  it('matches exact identifiers only', async () => {
-    const cfg: SecurityConfig = { restrictedColumns: ['password', 'ssn'] };
+  it('restricts every column whose name contains a bare entry, as 0.0.1 did (default)', async () => {
+    const cfg: SecurityConfig = { restrictedColumns: ['password', 'ssn', 'credit_card'] };
+    for (const sql of [
+      'SELECT email, password_hash FROM users',
+      'SELECT ssn_last4 FROM users',
+      'SELECT u.credit_card_number FROM users u',
+      'SELECT "PasswordHash" FROM users',
+      'SELECT id FROM users ORDER BY password_updated_at',
+    ]) {
+      expect({ sql, errors: (await check(sql, cfg)).errors.join() }).toEqual({
+        sql,
+        errors: expect.stringMatching(/Query accesses restricted columns: (password|ssn|credit_card)/),
+      });
+    }
+    // Strings, table names, function names and keywords are not columns
+    for (const sql of [
+      "SELECT id FROM users WHERE note = 'password' LIMIT 1",
+      'SELECT id FROM passwords LIMIT 1',
+      'SELECT has_password(id) FROM users LIMIT 1',
+    ]) {
+      expect({ sql, errors: (await check(sql, cfg)).errors }).toEqual({ sql, errors: [] });
+    }
+    // A bare entry that is part of a keyword does not match the keyword
+    expect((await check('SELECT id FROM t ORDER BY id LIMIT 1', { restrictedColumns: ['or'] })).errors).toEqual([]);
+  });
+
+  it('reaches columns through * by name fragment too', async () => {
+    const r = await check('SELECT * FROM users LIMIT 1', { restrictedColumns: ['password'] }, { schema });
+    expect(r.errors.join()).toMatch(/restricted columns: password/);
+  });
+
+  it('matches exact identifiers only with restrictedColumnsMatch: exact', async () => {
+    const cfg: SecurityConfig = { restrictedColumns: ['password', 'ssn'], restrictedColumnsMatch: 'exact' };
     for (const sql of [
       'SELECT username, password_updated_at, ssn_last4 FROM users LIMIT 1',
       "SELECT id FROM users WHERE note = 'password' LIMIT 1",
