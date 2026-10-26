@@ -340,14 +340,29 @@ function hasSetOperatorUpTo(s: Shape, maxDepth: number): boolean {
  * and (mssql, generic) TOP on the main SELECT when no set operator follows it.
  * @internal
  */
-/** Index of the WITH of `WITH TIES` right after the row count of `l` (past ROW/ROWS, PERCENT, `)`), or -1. */
-function tiesAfter(t: Token[], l: RowLimit): number {
-  for (let k = Math.max(l.valueEnd, l.keyword + 1), steps = 0; k < t.length && steps < 4; k++, steps++) {
-    if (isWordAt(t, k, 'WITH') && isWordAt(t, k + 1, 'TIES')) return k;
-    if (!(isWordAt(t, k, 'ROW') || isWordAt(t, k, 'ROWS') || isWordAt(t, k, 'PERCENT') || isPunctAt(t, k, ')'))) break;
+/**
+ * Index of the WITH of a `WITH TIES` that ends the row-count clause of `l`,
+ * or -1. Walks the whole clause after the FETCH or TOP keyword: FIRST/NEXT,
+ * the count (numbers, placeholders, operators, and parenthesized groups of any
+ * depth, skipped by their pair), ROW/ROWS and PERCENT.
+ */
+function tiesAfter(s: Shape, l: RowLimit): number {
+  const { t, pair } = s;
+  for (let k = l.keyword + 1; k < t.length; k++) {
+    const tok = t[k];
+    if (isWordAt(t, k, 'WITH')) return isWordAt(t, k + 1, 'TIES') ? k : -1;
+    if (tok.type === 'punct' && tok.value === '(' && pair[k] > k) {
+      k = pair[k];
+      continue;
+    }
+    if (tok.type === 'number' || tok.type === 'param' || tok.type === 'operator') continue;
+    if (tok.type === 'word' && COUNT_CLAUSE_WORDS.has(tok.value) && isWordAt(t, k, tok.value)) continue;
+    return -1;
   }
   return -1;
 }
+
+const COUNT_CLAUSE_WORDS = new Set(['FIRST', 'NEXT', 'ROW', 'ROWS', 'PERCENT']);
 
 export function findRowLimits(s: Shape, dialect: SqlDialect): RowLimit[] {
   const { t, depth } = s;
@@ -421,7 +436,7 @@ export function findRowLimits(s: Shape, dialect: SqlDialect): RowLimit[] {
       }
     }
   }
-  for (const l of out) l.ties = tiesAfter(t, l);
+  for (const l of out) l.ties = isWordAt(t, l.keyword, 'LIMIT') ? -1 : tiesAfter(s, l);
   return out;
 }
 

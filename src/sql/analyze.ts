@@ -293,57 +293,36 @@ interface CteScope {
  * order; each assigns roles to tokens so later passes (aliases, functions,
  * qualified columns, bare candidates) skip what earlier ones explained.
  */
-/** Words that start a list of table items (FROM a, b JOIN c ...). */
-const TABLE_LIST_START = set('FROM JOIN INTO UPDATE TABLE USING');
-/** Words that end a list of table items on its level. */
-const TABLE_LIST_END = set(`
-  WHERE GROUP ORDER HAVING LIMIT OFFSET ON SET VALUES SELECT UNION INTERSECT EXCEPT WINDOW
-  RETURNING FETCH DEFAULT INDEXED NOT
-`);
+/** A plain '...' string (not X'..' or another prefixed form). */
+const isPlainString = (t: Token | undefined): boolean => !!t && t.type === 'string' && t.text.charCodeAt(0) === 39; /* ' */
+
+/** Read a plain string as a quoted identifier, in place. */
+function retagAsName(tok: Token): void {
+  tok.type = 'quoted';
+  tok.value = tok.text.slice(1, -1).replace(/''/g, "'");
+}
 
 /**
  * SQLite reads a single-quoted string as a name wherever its grammar expects
  * one (`FROM 'accounts'`, `a.'password'`, `AS 'x'`), so the analysis must read
  * it that way too, or the table and its columns go unchecked. In the generic
  * dialect these forms are errors on the other databases, so reading them as
- * names is safe. Such strings are retagged as quoted identifiers, in place.
+ * names is safe. This pass retags the strings next to a `.` or after AS; table
+ * positions are retagged by the table scanner itself (tableNameAt), so both
+ * agree on where a table item starts.
  */
 function retagStringNames(t: Token[]): void {
-  let depth = 0;
-  let listDepth = -1;
   for (let i = 0; i < t.length; i++) {
     const tok = t[i];
-    if (tok.type === 'punct') {
-      if (tok.value === '(' || tok.value === '[') {
-        depth++;
-      } else if (tok.value === ')' || tok.value === ']') {
-        depth--;
-        if (listDepth > depth) listDepth = -1;
-      }
-      continue;
-    }
-    if (tok.type === 'word') {
-      if (TABLE_LIST_START.has(tok.value)) listDepth = depth;
-      else if (listDepth === depth && TABLE_LIST_END.has(tok.value)) listDepth = -1;
-      continue;
-    }
-    // Only plain '...' strings: X'..' blobs and other prefixed forms stay values
-    if (tok.type !== 'string' || tok.text.charCodeAt(0) !== 39 /* ' */) continue;
-    const prev = t[i - 1];
-    const next = t[i + 1];
-    const inList =
-      listDepth === depth &&
-      !!prev &&
-      (prev.type === 'word' || prev.type === 'quoted' || (prev.type === 'punct' && prev.value === ','));
-    if (inList || isPunct(prev, '.') || isPunct(next, '.') || isWord(prev, 'AS')) {
-      tok.type = 'quoted';
-      tok.value = tok.text.slice(1, -1).replace(/''/g, "'");
-    }
+    if (!isPlainString(tok)) continue;
+    if (isPunct(t[i - 1], '.') || isPunct(t[i + 1], '.') || isWord(t[i - 1], 'AS')) retagAsName(tok);
   }
 }
 
 class StatementAnalyzer {
   private readonly n: number;
+  /** sqlite and generic read a plain '...' string as a name where a name is expected. */
+  private readonly stringNames: boolean;
   /** Index of the matching `)`/`]` for an opener and vice versa; -1 if unbalanced. */
   private readonly pair: Int32Array;
   /** Index of the innermost enclosing `(`/`[`, or -1 at the top level. */
@@ -382,7 +361,8 @@ class StatementAnalyzer {
     private readonly dialect: SqlDialect,
     private readonly out: Collector
   ) {
-    if (dialect === 'sqlite' || dialect === 'generic') retagStringNames(t);
+    this.stringNames = dialect === 'sqlite' || dialect === 'generic';
+    if (this.stringNames) retagStringNames(t);
     const n = t.length;
     this.n = n;
     this.pair = new Int32Array(n).fill(-1);
@@ -581,6 +561,16 @@ class StatementAnalyzer {
   }
 
   /** Read `a`, `a.b`, `a.b.c` or `db..t` starting at `j`. Returns token indexes (-1 for an empty part). */
+  /**
+   * Whether a table name starts at `j`: a name, or (sqlite, generic) a plain
+   * single-quoted string, which is then retagged as a quoted name.
+   */
+  private tableNameAt(j: number): boolean {
+    const tok = this.t[j];
+    if (this.stringNames && isPlainString(tok)) retagAsName(tok);
+    return isName(tok);
+  }
+
   private readName(j: number): { parts: number[]; next: number } {
     const t = this.t;
     const parts = [j];
@@ -781,7 +771,7 @@ class StatementAnalyzer {
         this.mergeStatement(j);
         break;
       case 'TABLE':
-        if (isName(t[j + 1])) this.addTable(this.readName(j + 1).parts, false);
+        if (this.tableNameAt(j + 1)) this.addTable(this.readName(j + 1).parts, false);
         break;
       default:
         if (DDL_TABLE_STATEMENTS.has(tok.value)) this.ddlStatement(j);
@@ -800,7 +790,7 @@ class StatementAnalyzer {
       j++;
     }
     const tok = t[j];
-    if (!isName(tok)) return;
+    if (!this.tableNameAt(j)) return;
     if (tok.type === 'word' && (QUERY_HEADS.has(tok.value) || tok.value === 'DEFAULT' || tok.value === 'SET')) return;
     const nm = this.readName(j);
     const p = this.addTable(nm.parts, false);
@@ -865,7 +855,7 @@ class StatementAnalyzer {
     const limit = this.levelEnd(s);
     let j = s + 1;
     if (v === 'COPY') {
-      if (isName(t[j]) && !(t[j].type === 'word' && SQL_KEYWORDS.has(t[j].value))) {
+      if (this.tableNameAt(j) && !(t[j].type === 'word' && SQL_KEYWORDS.has(t[j].value))) {
         this.addTable(this.readName(j).parts, false);
       }
       return;
@@ -886,7 +876,7 @@ class StatementAnalyzer {
     if (isWord(t[j], 'ONLY')) j++;
     for (;;) {
       const tok = t[j];
-      if (!isName(tok) || (tok.type === 'word' && SQL_KEYWORDS.has(tok.value))) return;
+      if (!this.tableNameAt(j) || (tok.type === 'word' && SQL_KEYWORDS.has(tok.value))) return;
       const nm = this.readName(j);
       this.addTable(nm.parts, false);
       j = nm.next;
@@ -1119,7 +1109,7 @@ class StatementAnalyzer {
       if (!this.groupIsQuery(j)) this.regions.push(j + 1, close, 0);
       return this.parseAlias(Math.min(close + 1, limit), limit, true, null);
     }
-    if (!isName(tok) || (tok.type === 'word' && NOT_TABLE_START.has(tok.value))) return j;
+    if (!this.tableNameAt(j) || (tok.type === 'word' && NOT_TABLE_START.has(tok.value))) return j;
     const nm = this.readName(j);
     let after = nm.next;
     if (after < limit && isPunct(t[after], '(') && !this.isHintGroup(after)) {
@@ -1231,7 +1221,7 @@ class StatementAnalyzer {
         j++;
       }
       const tok = t[j];
-      if (!isName(tok) || (tok.type === 'word' && SQL_KEYWORDS.has(tok.value))) continue; // INTO OUTFILE, INTO @var
+      if (!this.tableNameAt(j) || (tok.type === 'word' && SQL_KEYWORDS.has(tok.value))) continue; // INTO OUTFILE, INTO @var
       this.addTable(this.readName(j).parts, false);
     }
   }

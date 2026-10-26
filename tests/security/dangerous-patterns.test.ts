@@ -281,3 +281,34 @@ describe('T-SQL queries stacked without ";"', () => {
     );
   });
 });
+
+describe('T-SQL statements that need no ";" (continued)', () => {
+  it.each(['mssql', undefined] as const)('rejects a second statement of any kind (%s)', async (databaseType) => {
+    const v = new SecurityValidator({ requireUserContext: false }, { databaseType });
+    for (const sql of [
+      "SELECT id FROM orders PRINT 'x'",
+      "SELECT id FROM orders THROW 50000, 'x', 1",
+      "SELECT id FROM orders RAISERROR('x', 16, 1)",
+      'SELECT id FROM orders RETURN',
+      'SELECT id FROM orders OPEN c',
+      'SELECT id FROM orders CLOSE c',
+      'SELECT id FROM orders DEALLOCATE c',
+    ]) {
+      expect({ sql, errors: (await v.validate(sql)).errors }).toEqual({
+        sql,
+        errors: expect.arrayContaining(['Query contains dangerous patterns: Multiple statements detected']),
+      });
+    }
+  });
+
+  it.each(['mssql', undefined] as const)('still accepts columns named like them (%s)', async (databaseType) => {
+    const v = new SecurityValidator({ requireUserContext: false }, { databaseType });
+    for (const sql of [
+      'SELECT open, close, high, low FROM prices',
+      'SELECT p.open, p.close FROM prices p WHERE close > open ORDER BY close',
+      'SELECT AVG(close) AS c, MAX(open) FROM prices GROUP BY close',
+    ]) {
+      expect({ sql, errors: (await v.validate(sql)).errors }).toEqual({ sql, errors: [] });
+    }
+  });
+});

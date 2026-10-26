@@ -151,6 +151,12 @@ describe('SQLite names written as single-quoted strings', () => {
     expect(tableNames("UPDATE 'orders' SET total = 1", dialect)).toEqual(['orders']);
     expect(tableNames("DELETE FROM 'orders' WHERE id = 1", dialect)).toEqual(['orders']);
     expect(columns("SELECT a.'password' FROM accounts a", dialect)).toContain('a.password');
+    // Items after a join condition or an index clause are table items too
+    expect(tableNames("SELECT * FROM orders o JOIN notes n ON n.id = o.id, 'secrets'", dialect)).toEqual(['orders', 'notes', 'secrets']);
+    expect(tableNames("SELECT * FROM orders NOT INDEXED, 'secrets'", dialect)).toEqual(['orders', 'secrets']);
+    expect(tableNames("SELECT * FROM orders INDEXED BY idx, 'secrets'", dialect)).toEqual(['orders', 'secrets']);
+    // A string in a join condition stays a value
+    expect(columns("SELECT o.id FROM orders o JOIN notes n ON 'x' = n.body", dialect)).not.toContain('x');
     expect(analyzeSql("SELECT 'it''s' FROM 'x''y'", dialect).tables[0].name).toBe("x'y");
   });
 

@@ -89,6 +89,7 @@ const USER_ROWS: Record<string, Array<Array<string | number>>> = {
 const PRODUCTS = [
   [1, 'apple'],
   [2, 'pear'],
+  [3, 'plum'], // no orders: outer joins keep it with NULLs
 ];
 
 /** CREATE and INSERT statements for the coverage tables, optionally with one user's rows only. */
@@ -169,6 +170,9 @@ export const COVERAGE_KEEPS_MEANING: Array<readonly [string, string]> = [
   ['join with a lookup table', 'SELECT o.id, p.name FROM orders o JOIN products p ON p.id = o.product_id'],
   ['protected table joined in, sensitive column left out', 'SELECT a.email FROM orders o JOIN accounts a ON a.user_id = o.user_id'],
   ['plain filter', 'SELECT id, total FROM orders WHERE total > 5'],
+  // A user table on the nullable side of an outer join: the user's unmatched rows must survive
+  ['LEFT JOIN with the user table on the right', 'SELECT p.name, o.id AS oid FROM products p LEFT JOIN orders o ON o.product_id = p.id'],
+  ['RIGHT JOIN with the user table on the left', 'SELECT p.name, o.id AS oid FROM orders o RIGHT JOIN products p ON o.product_id = p.id'],
   // The level's own table has no user column; the filter must bind to the derived table's
   ['lookup table joined to a per-user aggregate', 'SELECT p.name, t.cnt FROM products p JOIN (SELECT user_id, product_id, COUNT(*) AS cnt FROM orders GROUP BY user_id, product_id) t ON t.product_id = p.id'],
 ];

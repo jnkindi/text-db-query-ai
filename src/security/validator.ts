@@ -75,6 +75,7 @@ const TSQL_STATEMENTS = words(`
   INSERT UPDATE DELETE MERGE DROP CREATE ALTER TRUNCATE GRANT REVOKE DENY EXEC EXECUTE WAITFOR
   SHUTDOWN KILL BACKUP RESTORE DECLARE SET USE DBCC BULK RECONFIGURE CHECKPOINT REVERT SETUSER
   BEGIN COMMIT ROLLBACK IF WHILE READTEXT WRITETEXT UPDATETEXT
+  PRINT THROW RAISERROR RETURN OPEN CLOSE DEALLOCATE GOTO BREAK CONTINUE SAVE
 `);
 /** Words after which no T-SQL statement can start: the next word is an operand or part of the clause. */
 const NO_STATEMENT_AFTER = words(`
@@ -99,7 +100,7 @@ const QUERY_GROUP_AFTER = words(`
 /** T-SQL set operators. MINUS is not one (it would be an alias there). */
 const SET_OPERATORS = words('UNION INTERSECT EXCEPT');
 /** T-SQL statements that are complete without any argument. */
-const TSQL_COMPLETE_ALONE = words('COMMIT ROLLBACK SHUTDOWN CHECKPOINT RECONFIGURE REVERT SETUSER');
+const TSQL_COMPLETE_ALONE = words('COMMIT ROLLBACK SHUTDOWN CHECKPOINT RECONFIGURE REVERT SETUSER RETURN BREAK CONTINUE THROW');
 
 /** Words before INTO in `INSERT [modifiers] INTO`, `MERGE TOP (n) INTO`, `INSERT OR IGNORE INTO`. */
 const INTO_PREFIX_WORDS = words('LOW_PRIORITY DELAYED HIGH_PRIORITY IGNORE OR ROLLBACK ABORT FAIL TOP');
@@ -238,6 +239,25 @@ function isLoneParam(t: Token[], i: number): boolean {
   if (!tok || tok.type !== 'param' || tok.text.startsWith('@')) return false;
   const next = t[isPunctAt(t, i, '(') ? k + 2 : k + 1];
   return !(next && (next.type === 'operator' || (next.type === 'word' && next.value === 'PERCENT')));
+}
+
+/**
+ * Tables of one query level that an outer join can null-extend: the table after
+ * LEFT JOIN, every table before RIGHT JOIN, and both sides of FULL JOIN.
+ */
+function outerJoinNullable(t: Token[], direct: LocatedTable[]): Set<LocatedTable> {
+  const out = new Set<LocatedTable>();
+  for (let n = 0; n < direct.length; n++) {
+    let k = direct[n].index - 1;
+    while (isWordAt(t, k, 'LATERAL') || isWordAt(t, k, 'ONLY')) k--;
+    if (!isWordAt(t, k, 'JOIN')) continue;
+    k--;
+    if (isWordAt(t, k, 'OUTER')) k--;
+    const kind = isWordAt(t, k, 'LEFT') ? 'left' : isWordAt(t, k, 'RIGHT') ? 'right' : isWordAt(t, k, 'FULL') ? 'full' : '';
+    if (kind === 'left' || kind === 'full') out.add(direct[n]);
+    if (kind === 'right' || kind === 'full') for (let m = 0; m < n; m++) out.add(direct[m]);
+  }
+  return out;
 }
 
 /** A UNION, INTERSECT or EXCEPT, optionally with ALL or DISTINCT, right before `i`. */
@@ -1410,7 +1430,10 @@ export class SecurityValidator {
       }
     }
 
-    const chosen = this.rlsTarget(st, bs, be, d, head === 'SELECT' && from >= 0 ? from : -1, where >= 0 ? where : boundary);
+    const target = this.rlsTarget(st, bs, be, d, head === 'SELECT' && from >= 0 ? from : -1, where >= 0 ? where : boundary);
+    // Every user table here is on the nullable side of an outer join: they are wrapped instead
+    if (target === 'wrap') return;
+    const chosen = target;
     if (chosen) for (const l of chosen.covered) st.handled.add(l.index);
     const qualifier = chosen && chosen.qualify ? `${this.tableText(st, chosen.table)}.` : '';
     // An existing qualified `t.col = v` only stands in for the filter on a single-table
@@ -1527,7 +1550,7 @@ export class SecurityValidator {
     d: number,
     from: number,
     fromEnd: number
-  ): RlsTarget | undefined {
+  ): RlsTarget | 'wrap' | undefined {
     const { shape } = st;
     // Tables of this branch's own query level (parenthesized joins included, subqueries not)
     const scope = queryScopes(shape);
@@ -1574,7 +1597,11 @@ export class SecurityValidator {
       this.schemaTablesFor(l.ref).some((tb) => (tb.columns ?? []).some((c) => c.name.toUpperCase() === column))
     );
     const unlisted = direct.filter((l) => this.schemaTablesFor(l.ref).length === 0);
-    const owned = [...known, ...unlisted];
+    // A user table on the nullable side of an outer join cannot take the filter in WHERE
+    // (it would drop the user's own unmatched rows); it is wrapped instead.
+    const nullable = outerJoinNullable(shape.t, direct);
+    const owned = [...known, ...unlisted].filter((l) => !nullable.has(l));
+    if (owned.length === 0 && known.length + unlisted.length > 0) return 'wrap';
     if (!joined) return { table: direct[0], qualify: false, covered: [direct[0]], direct, alone: true };
     if (owned.length > 0) return { table: owned[0], qualify: true, covered: [owned[0]], direct, alone: false };
     return unqualified();

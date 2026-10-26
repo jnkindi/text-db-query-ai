@@ -325,10 +325,16 @@ describe('maxRowLimit', () => {
 
   it('refuses WITH TIES, which can return any number of rows that tie with the last one', async () => {
     const cfg: SecurityConfig = { maxRowLimit: 100 };
-    expect((await check('SELECT * FROM t ORDER BY a FETCH FIRST 5 ROWS WITH TIES', cfg, { databaseType: 'postgres' })).errors).toEqual([
-      'FETCH ... WITH TIES can return more than 100 rows',
-    ]);
-    for (const sql of ['SELECT TOP 5 WITH TIES * FROM t ORDER BY a', 'SELECT TOP (5) WITH TIES * FROM t ORDER BY a']) {
+    for (const sql of ['SELECT * FROM t ORDER BY a FETCH FIRST 5 ROWS WITH TIES', 'SELECT * FROM t ORDER BY a FETCH FIRST ((5)) ROWS WITH TIES', 'SELECT * FROM t ORDER BY a FETCH NEXT $1 ROWS WITH TIES']) {
+      expect((await check(sql, cfg, { databaseType: 'postgres' })).errors).toEqual(['FETCH ... WITH TIES can return more than 100 rows']);
+    }
+    for (const sql of [
+      'SELECT TOP 5 WITH TIES * FROM t ORDER BY a',
+      'SELECT TOP (5) WITH TIES * FROM t ORDER BY a',
+      'SELECT TOP ((((5)))) WITH TIES * FROM t ORDER BY a',
+      'SELECT TOP (@n) WITH TIES * FROM t ORDER BY a',
+      'SELECT TOP 5 PERCENT WITH TIES * FROM t ORDER BY a',
+    ]) {
       expect((await check(sql, cfg, { databaseType: 'mssql' })).errors).toEqual(['TOP ... WITH TIES can return more than 100 rows']);
     }
     expect((await check('SELECT * FROM t ORDER BY a FETCH FIRST 5 ROWS ONLY', cfg, { databaseType: 'postgres' })).errors).toEqual([]);
