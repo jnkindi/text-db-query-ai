@@ -1404,9 +1404,7 @@ export class SecurityValidator {
       }
     }
 
-    const target = this.rlsTarget(st, bs, be, d, head === 'SELECT' && from >= 0 ? from : -1, where >= 0 ? where : boundary);
-    if (target === 'skip') return;
-    const chosen = target;
+    const chosen = this.rlsTarget(st, bs, be, d, head === 'SELECT' && from >= 0 ? from : -1, where >= 0 ? where : boundary);
     if (chosen) for (const l of chosen.covered) st.handled.add(l.index);
     const qualifier = chosen && chosen.qualify ? `${this.tableText(st, chosen.table)}.` : '';
     // An existing qualified `t.col = v` only stands in for the filter on a single-table
@@ -1501,14 +1499,13 @@ export class SecurityValidator {
 
   /**
    * The table the filter belongs to, whether it must be qualified, and the
-   * tables of the branch it covers; 'skip' when the branch needs no filter.
+   * tables of the branch it covers.
    *
-   * - One table and no join: the 0.0.1 filter on it (`alone`).
+   * - One table and no join: the 0.0.1 filter on it (`alone`), whatever the
+   *   schema says: a schema may omit columns, so the filter fails closed.
    * - With a schema, several tables or a join: the first table that holds user
    *   rows (has the column, or is missing from the schema), qualified. When
-   *   none does, an introspected schema (exactNames, complete column lists)
-   *   needs no filter here, and a hand-written one, which may be partial,
-   *   keeps the unqualified 0.0.1 filter: it binds to whichever table or
+   *   none does, the unqualified 0.0.1 filter: it binds to whichever table or
    *   derived table really has the column, or fails.
    * - Without a schema, several tables keep the unqualified 0.0.1 filter, which
    *   fails as ambiguous when several have the column; one table joined to
@@ -1524,7 +1521,7 @@ export class SecurityValidator {
     d: number,
     from: number,
     fromEnd: number
-  ): RlsTarget | 'skip' | undefined {
+  ): RlsTarget | undefined {
     const { shape } = st;
     // Tables of this branch's own query level (parenthesized joins included, subqueries not)
     const scope = queryScopes(shape);
@@ -1572,7 +1569,6 @@ export class SecurityValidator {
     );
     const unlisted = direct.filter((l) => this.schemaTablesFor(l.ref).length === 0);
     const owned = [...known, ...unlisted];
-    if (owned.length === 0 && this.options.schema?.exactNames === true) return 'skip';
     if (!joined) return { table: direct[0], qualify: false, covered: [direct[0]], direct, alone: true };
     if (owned.length > 0) return { table: owned[0], qualify: true, covered: [owned[0]], direct, alone: false };
     return unqualified();

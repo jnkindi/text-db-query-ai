@@ -101,10 +101,9 @@ describeSqlite('row-level security covers every read (SQLite)', () => {
       );
     });
 
-    it('with an introspected schema, adds no filter where no table has the column', async () => {
+    it('keeps the 0.0.1 filter where the schema shows no column, even with exactNames (a schema may be partial)', async () => {
       const exact = new SecurityValidator(CONFIG, { databaseType: 'sqlite', schema: { ...SCHEMA, exactNames: true } });
-      expect(exact.addRowLevelSecurity('SELECT * FROM products', USER)).toBe('SELECT * FROM products');
-      // A hand-written schema may be partial, so the 0.0.1 filter stays
+      expect(exact.addRowLevelSecurity('SELECT * FROM products', USER)).toBe('SELECT * FROM products WHERE user_id = 1');
       expect(validator.addRowLevelSecurity('SELECT * FROM products', USER)).toBe('SELECT * FROM products WHERE user_id = 1');
       for (const [, sql] of [...COVERAGE_LEAKS, ...COVERAGE_KEEPS_MEANING]) {
         await expectSameRows(exact, fullDb, ownDb, sql, true);
