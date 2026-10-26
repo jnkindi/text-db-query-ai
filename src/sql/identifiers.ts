@@ -22,6 +22,18 @@ export function needsQuoting(name: string, dialect: SqlDialect): boolean {
 }
 
 /**
+ * `name` written as an identifier for `dialect`: quoted only when
+ * needsQuoting() says so. With `exactCase` false (a schema whose case may not
+ * match the database), a Postgres name that needs quotes only for its
+ * uppercase letters stays unquoted, so the server folds it to lower case.
+ */
+export function formatIdentifier(name: string, dialect: SqlDialect, exactCase = true): string {
+  if (!needsQuoting(name, dialect)) return name;
+  if (!exactCase && dialect === 'postgres' && !needsQuoting(name.toLowerCase(), dialect)) return name;
+  return quoteIdentifier(name, dialect);
+}
+
+/**
  * Quote an identifier for `dialect`: `"x"` for postgres, sqlite and generic,
  * backticks for mysql and `[x]` for mssql. The closing quote character inside
  * the name is doubled.

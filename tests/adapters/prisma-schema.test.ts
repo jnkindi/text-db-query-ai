@@ -22,6 +22,7 @@ describe('parsePrismaSchema', () => {
 
     expect(parsePrismaSchema(source)).toEqual({
       databaseType: 'postgres',
+      exactNames: true,
       tables: [
         {
           name: 'User',
@@ -48,6 +49,7 @@ describe('parsePrismaSchema', () => {
 
     expect(parsePrismaSchema(source)).toEqual({
       databaseType: 'postgres',
+      exactNames: true,
       tables: [
         {
           name: 'User',
@@ -82,6 +84,7 @@ describe('parsePrismaSchema', () => {
   it('handles punctuation inside strings, multi-line attributes and named arguments', () => {
     const expected = {
       databaseType: 'postgres',
+      exactNames: true,
       tables: [
         {
           name: 'Note',
@@ -160,6 +163,7 @@ describe('parsePrismaSchema', () => {
   it('parses a full PostgreSQL schema', () => {
     expect(parsePrismaSchema(fixture('postgres-full.prisma'))).toEqual({
       databaseType: 'postgres',
+      exactNames: true,
       tables: [
         {
           name: 'users',
@@ -291,6 +295,7 @@ describe('parsePrismaSchema', () => {
   it('uses MySQL native types and enum definitions', () => {
     expect(parsePrismaSchema(fixture('mysql.prisma'))).toEqual({
       databaseType: 'mysql',
+      exactNames: true,
       tables: [
         {
           name: 'Product',

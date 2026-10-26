@@ -95,6 +95,7 @@ const column = (name: string, type: string, nullable: boolean, nativeType: strin
 
 const EXPECTED = {
   databaseType: 'mssql',
+  exactNames: true,
   tables: [
     {
       name: 'Customer',

@@ -16,6 +16,7 @@ const API_KEY = 'sk-test-key-123456';
 
 const SCHEMA: DatabaseSchema = {
   databaseType: 'postgres',
+  exactNames: true,
   tables: [
     {
       name: 'User',

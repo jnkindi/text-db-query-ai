@@ -17,7 +17,7 @@ export {
   isReservedKeyword,
 } from './keywords';
 
-export { needsQuoting, quoteIdentifier } from './identifiers';
+export { formatIdentifier, needsQuoting, quoteIdentifier } from './identifiers';
 
 export type { SqlReading } from './readings';
 export { sqlReadings } from './readings';

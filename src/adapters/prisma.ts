@@ -774,6 +774,7 @@ export function parsePrismaSchema(schemaContent: string): DatabaseSchema {
   return {
     databaseType,
     tables,
+    exactNames: true,
   };
 }
 

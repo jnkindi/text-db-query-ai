@@ -1,5 +1,5 @@
 import { DatabaseSchema, TableSchema, ColumnSchema, DatabaseType } from '../types';
-import { needsQuoting, quoteIdentifier, SqlDialect, toSqlDialect } from '../sql';
+import { formatIdentifier, SqlDialect, toSqlDialect } from '../sql';
 
 /**
  * Options for SchemaAnalyzer.renderForModel().
@@ -157,7 +157,7 @@ export class SchemaAnalyzer {
     if (tables.length === 0) return '(no tables)';
 
     const qualify = this.qualifyTables(dialect);
-    const name = (n: string) => renderName(n, dialect);
+    const name = (n: string) => renderName(n, dialect, this.schema.exactNames === true);
     const blocks: string[] = [];
 
     for (const table of tables) {
@@ -191,7 +191,7 @@ export class SchemaAnalyzer {
     withDescriptions: boolean,
     withSamples: boolean
   ): string {
-    let line = `${renderName(column.name, dialect)} ${inlineText(column.nativeType || column.type || 'unknown')}`;
+    let line = `${renderName(column.name, dialect, this.schema.exactNames === true)} ${inlineText(column.nativeType || column.type || 'unknown')}`;
     if (isPrimaryKey) line += ' PK';
     if (reference) line += ` FK -> ${reference}`;
     if (column.enumValues && column.enumValues.length > 0) {
@@ -273,7 +273,7 @@ export class SchemaAnalyzer {
   generateExampleQueries(): string[] {
     const examples: string[] = [];
     const dialect = toSqlDialect(this.schema.databaseType);
-    const name = (n: string) => renderName(n, dialect);
+    const name = (n: string) => renderName(n, dialect, this.schema.exactNames === true);
 
     for (const table of this.schema.tables) {
       const tableName = name(table.name);
@@ -353,9 +353,9 @@ export class SchemaAnalyzer {
   }
 }
 
-/** A name as it must be written in `dialect`: quoted only when needed. */
-function renderName(name: string, dialect: SqlDialect): string {
-  return needsQuoting(name, dialect) ? quoteIdentifier(name, dialect) : name;
+/** A name as it must be written in `dialect`: quoted only when needed (see DatabaseSchema.exactNames). */
+function renderName(name: string, dialect: SqlDialect, exactCase: boolean): string {
+  return formatIdentifier(name, dialect, exactCase);
 }
 
 /** Primary key columns: primaryKeyColumns, or the 0.0.1 primaryKey string ("a, b" for composite keys). */

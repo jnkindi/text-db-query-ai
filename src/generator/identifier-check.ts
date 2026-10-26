@@ -14,7 +14,7 @@ import { ColumnSchema, DatabaseSchema, TableSchema } from '../types';
 import {
   analyzeSql,
   isReservedKeyword,
-  needsQuoting,
+  formatIdentifier,
   quoteIdentifier,
   SqlAnalysis,
   SqlDialect,
@@ -201,7 +201,7 @@ export class IdentifierChecker {
 
   /** Render a schema name the way the dialect needs it written. */
   display(name: string): string {
-    return needsQuoting(name, this.dialect) ? quoteIdentifier(name, this.dialect) : name;
+    return formatIdentifier(name, this.dialect, this.schema.exactNames === true);
   }
 
   /** A reference as written in the query. */
@@ -268,6 +268,14 @@ export class IdentifierChecker {
       return undefined;
     }
     if (this.dialect !== 'postgres') return candidates;
+    if (!this.schema.exactNames) {
+      // The schema's case may not be the database's (see DatabaseSchema.exactNames):
+      // match case-insensitively, as in 0.0.1. A reserved word still needs quotes.
+      if (!ref.quoted && ref.schema === undefined && isReservedKeyword(key, 'postgres')) {
+        issues.add(this.quotingIssue(ref.name, candidates[0].table.name, undefined, 'Table', '', 'it is a reserved word'));
+      }
+      return candidates;
+    }
 
     // Postgres folds unquoted names to lower case; quoted names must match exactly.
     const folded = ref.quoted ? ref.name : key;
@@ -311,7 +319,8 @@ export class IdentifierChecker {
     for (const entry of tables) {
       const list = entry.columns.get(key);
       if (!list) continue;
-      if (this.dialect !== 'postgres') return; // case-insensitive match is enough
+      // Case-insensitive match is enough, except for Postgres names known to be exact
+      if (this.dialect !== 'postgres' || !this.schema.exactNames) return;
       const folded = quoted ? name : key;
       if (list.some((c) => c.name === folded)) return;
       if (!match) {

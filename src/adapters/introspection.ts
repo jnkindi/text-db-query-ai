@@ -390,6 +390,7 @@ export async function introspectSchema(
   return {
     databaseType,
     tables: buildTables(raw, options),
+    exactNames: true,
   };
 }
 

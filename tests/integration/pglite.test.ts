@@ -169,7 +169,7 @@ describe('PGlite (Postgres 18)', () => {
     const adapter = new DatabaseIntrospectionAdapter(db, 'postgres', { markSensitiveColumns: ['password'] });
     const schema = await adapter.extractSchema();
 
-    expect(schema).toEqual<DatabaseSchema>({ databaseType: 'postgres', tables: PUBLIC_TABLES });
+    expect(schema).toEqual<DatabaseSchema>({ databaseType: 'postgres', tables: PUBLIC_TABLES, exactNames: true });
     expect(db.queries).toHaveLength(5);
   });
 
@@ -273,7 +273,7 @@ describe('PGlite (Postgres 18)', () => {
 
     it('extracts the same schema in 5 queries', async () => {
       const schema = await new PrismaAdapter(prisma, 'postgres', { markSensitiveColumns: ['password'] }).extractSchema();
-      expect(schema).toEqual({ databaseType: 'postgres', tables: PUBLIC_TABLES });
+      expect(schema).toEqual({ databaseType: 'postgres', tables: PUBLIC_TABLES, exactNames: true });
       expect(prisma.$queryRawUnsafe).toHaveBeenCalledTimes(5);
       for (const call of prisma.$queryRawUnsafe.mock.calls) expect(call.slice(1)).toEqual(['public']);
     });

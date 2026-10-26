@@ -133,7 +133,7 @@ describeSqlite3(sqlite3Title, () => {
     const all = jest.spyOn(db, 'all');
     try {
       const schema = await new DatabaseIntrospectionAdapter(db, 'sqlite').extractSchema();
-      expect(schema).toEqual({ databaseType: 'sqlite', tables: EXPECTED });
+      expect(schema).toEqual({ databaseType: 'sqlite', tables: EXPECTED, exactNames: true });
       expect(all).toHaveBeenCalledTimes(2);
     } finally {
       all.mockRestore();
@@ -168,7 +168,7 @@ describeNodeSqlite('node:sqlite (in-memory)', () => {
     try {
       db.exec(DDL);
       const schema = await new DatabaseIntrospectionAdapter(db, 'sqlite').extractSchema();
-      expect(schema).toEqual({ databaseType: 'sqlite', tables: EXPECTED });
+      expect(schema).toEqual({ databaseType: 'sqlite', tables: EXPECTED, exactNames: true });
     } finally {
       db.close();
     }

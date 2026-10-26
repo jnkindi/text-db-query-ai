@@ -9,6 +9,7 @@ import { DatabaseSchema, DatabaseType, TableSchema } from '../../src/types';
 
 const PRISMA_LIKE: DatabaseSchema = {
   databaseType: 'postgres',
+  exactNames: true,
   tables: [
     {
       name: 'User',
@@ -46,7 +47,8 @@ const PRISMA_LIKE: DatabaseSchema = {
   ],
 };
 
-const analyzer = (databaseType: DatabaseType, tables: TableSchema[]) => new SchemaAnalyzer({ databaseType, tables });
+const analyzer = (databaseType: DatabaseType, tables: TableSchema[], exactNames = true) =>
+  new SchemaAnalyzer({ databaseType, tables, exactNames });
 
 describe('renderForModel', () => {
   it('renders one compact line per column with quoting, types, keys, enums, samples and markers', () => {
@@ -212,5 +214,23 @@ describe('generateExampleQueries', () => {
       'SELECT "Order".* FROM "Order" JOIN "User" ON "Order"."userId" = "User".id',
     ]);
     expect(analyzer('mysql', tables).generateExampleQueries()[0]).toBe('SELECT id, userId FROM `Order` LIMIT 10');
+  });
+});
+
+describe('hand-written schemas (exactNames not set)', () => {
+  it('writes capitalized Postgres names unquoted, as 0.0.1 did, and still quotes reserved and odd names', () => {
+    const text = analyzer(
+      'postgres',
+      [
+        { name: 'Users', columns: [{ name: 'Id', type: 'number' }, { name: 'first name', type: 'string' }] },
+        { name: 'order', columns: [{ name: 'id', type: 'number' }] },
+      ],
+      false
+    ).renderForModel();
+    expect(text).toContain('Users');
+    expect(text).not.toContain('"Users"');
+    expect(text).not.toContain('"Id"');
+    expect(text).toContain('"first name"');
+    expect(text).toContain('"order"');
   });
 });

@@ -10,9 +10,11 @@ import { SqlDialect } from '../../src/sql';
 import { valid, validEdgeCases, CorpusDialect } from '../fixtures/sql-corpus';
 
 /** A schema from `{ table: 'col1 col2', 'schema.table': '...' }`. */
+/** Names in these schemas are exact, as introspection and parsePrismaSchema produce them. */
 function schemaOf(databaseType: DatabaseType, tables: Record<string, string>): DatabaseSchema {
   return {
     databaseType,
+    exactNames: true,
     tables: Object.entries(tables).map(([qualified, columns]): TableSchema => {
       const dot = qualified.indexOf('.');
       const table: TableSchema = {
@@ -423,6 +425,13 @@ describe('IdentifierChecker', () => {
     expect(new IdentifierChecker(schemaOf('mysql', {}), 'mysql').display('order')).toBe('`order`');
     expect(new IdentifierChecker(schemaOf('mssql', {}), 'mssql').display('Order Details')).toBe('[Order Details]');
     expect(new IdentifierChecker(schemaOf('sqlite', {}), 'sqlite').display('users')).toBe('users');
+  });
+
+  it('matches case-insensitively when the schema names may not be exact (hand-written, as in 0.0.1)', () => {
+    const handWritten: DatabaseSchema = { ...schemaOf('postgres', { Users: 'Id Email' }), exactNames: undefined };
+    expect(checkIdentifiers('SELECT id, email FROM users', handWritten)).toEqual([]);
+    expect(checkIdentifiers('SELECT Id FROM Users', handWritten)).toEqual([]);
+    expect(kinds(checkIdentifiers('SELECT name FROM users', handWritten))).toEqual(['unknown_column:Users.name']);
   });
 
   it('defaults the dialect to the schema database type', () => {

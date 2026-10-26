@@ -78,6 +78,15 @@ export interface ForeignKeySchema {
 export interface DatabaseSchema {
   tables: TableSchema[];
   databaseType: DatabaseType;
+  /**
+   * Table and column names match the database exactly, including case. The
+   * introspection adapters and parsePrismaSchema set it. When it is not set,
+   * a Postgres name that differs from a plain name only by its uppercase
+   * letters (`Users`) is written unquoted, as in 0.0.1, since hand-written
+   * schemas often capitalize lowercase tables; set it for tables really
+   * created with mixed case, such as Prisma's "User".
+   */
+  exactNames?: boolean;
 }
 
 /**

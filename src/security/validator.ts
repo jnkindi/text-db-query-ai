@@ -13,8 +13,7 @@ import {
   toSqlDialect,
   significantTokens,
   isBlockedFunction,
-  needsQuoting,
-  quoteIdentifier,
+  formatIdentifier,
   sqlReadings,
   SqlLexError,
   type LexOptions,
@@ -1454,7 +1453,8 @@ export class SecurityValidator {
         return !(this.rules.byColumn.get(key) ?? []).some((rule) => this.tableMatches(rule, ref));
       });
     if (columns.length === 0) return '*';
-    return columns.map((name) => (needsQuoting(name, this.dialect) ? quoteIdentifier(name, this.dialect) : name)).join(', ');
+    const exact = this.options.schema?.exactNames === true;
+    return columns.map((name) => formatIdentifier(name, this.dialect, exact)).join(', ');
   }
 
   /** How the query names a table: its alias as written, else its (qualified) name as written. */
