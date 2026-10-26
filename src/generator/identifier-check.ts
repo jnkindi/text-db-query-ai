@@ -54,8 +54,19 @@ export interface IdentifierInspection {
   referencedTables: TableSchema[];
 }
 
-/** Schemas whose tables are system catalogs: skipped when a reference names them explicitly. */
-const SYSTEM_SCHEMAS: ReadonlySet<string> = new Set(['information_schema', 'pg_catalog']);
+/**
+ * Schemas whose tables are system catalogs, per dialect: skipped when a
+ * reference names them explicitly. Unqualified catalog names (`pg_tables`)
+ * are still reported, because nothing tells them apart from a typo.
+ */
+const COMMON_SYSTEM_SCHEMAS = ['information_schema', 'pg_catalog'];
+const SYSTEM_SCHEMAS: Record<SqlDialect, ReadonlySet<string>> = {
+  postgres: new Set(COMMON_SYSTEM_SCHEMAS),
+  mysql: new Set([...COMMON_SYSTEM_SCHEMAS, 'performance_schema', 'mysql', 'sys']),
+  sqlite: new Set(COMMON_SYSTEM_SCHEMAS),
+  mssql: new Set([...COMMON_SYSTEM_SCHEMAS, 'sys']),
+  generic: new Set([...COMMON_SYSTEM_SCHEMAS, 'performance_schema', 'mysql', 'sys']),
+};
 /** SQLite catalog tables, skipped by name. */
 const SYSTEM_TABLES: ReadonlySet<string> = new Set([
   'sqlite_master',
@@ -73,6 +84,19 @@ const PSEUDO_COLUMNS: ReadonlySet<string> = new Set([
   'rowid', '_rowid_', 'oid', 'ctid', 'xmin', 'xmax', 'cmin', 'cmax', 'tableoid',
   'utc_date', 'utc_time', 'utc_timestamp', 'sysdate', 'rownum',
 ]);
+const SQLITE_ROW_COLUMNS = ['rowid', '_rowid_', 'oid'];
+const POSTGRES_SYSTEM_COLUMNS = ['ctid', 'xmin', 'xmax', 'cmin', 'cmax', 'tableoid'];
+/**
+ * Implicit columns every table has, per dialect (lowercase), accepted when
+ * qualified (`t.rowid`): the prompt asks for qualified columns in joins.
+ */
+const QUALIFIED_PSEUDO_COLUMNS: Record<SqlDialect, ReadonlySet<string>> = {
+  postgres: new Set(POSTGRES_SYSTEM_COLUMNS),
+  mysql: new Set(['_rowid']),
+  sqlite: new Set(SQLITE_ROW_COLUMNS),
+  mssql: new Set(),
+  generic: new Set([...SQLITE_ROW_COLUMNS, ...POSTGRES_SYSTEM_COLUMNS, '_rowid']),
+};
 /** Words before a table item. */
 const TABLE_INTRODUCERS: ReadonlySet<string> = new Set(['JOIN', 'APPLY', 'STRAIGHT_JOIN']);
 /** Words skipped between a table introducer and the table item. */
@@ -174,12 +198,14 @@ export class IdentifierChecker {
     }
 
     const bareCheckable = allTablesKnown && !hasOpaqueSource(analysis.statements);
+    const qualifiedPseudoColumns = QUALIFIED_PSEUDO_COLUMNS[this.dialect] ?? QUALIFIED_PSEUDO_COLUMNS.generic;
     let calledNames: Set<string> | undefined;
 
     for (const col of analysis.columns) {
       if (col.qualifier !== undefined) {
         const list = sources.get(col.qualifier.toLowerCase());
         if (!list || list.some((s) => s === 'opaque')) continue;
+        if (!col.quoted && qualifiedPseudoColumns.has(col.name.toLowerCase())) continue;
         this.checkColumn(col.name, col.quoted, `${col.qualifier}.`, list as TableEntry[], issues, true);
         continue;
       }
@@ -247,7 +273,8 @@ export class IdentifierChecker {
   private resolveTable(ref: TableReference, index: Map<string, TableEntry[]>, issues: IssueList): TableEntry[] | undefined {
     const key = ref.name.toLowerCase();
     const schemaKey = ref.schema !== undefined ? ref.schema.toLowerCase() : undefined;
-    if ((schemaKey !== undefined && SYSTEM_SCHEMAS.has(schemaKey)) || SYSTEM_TABLES.has(key)) return undefined;
+    const systemSchemas = SYSTEM_SCHEMAS[this.dialect] ?? SYSTEM_SCHEMAS.generic;
+    if ((schemaKey !== undefined && systemSchemas.has(schemaKey)) || SYSTEM_TABLES.has(key)) return undefined;
     if (ref.name.charCodeAt(0) === 35 /* # */) return undefined; // T-SQL temporary table
 
     const written = (ref.schema !== undefined ? `${this.written(ref.schema, false)}.` : '') + this.written(ref.name, ref.quoted);

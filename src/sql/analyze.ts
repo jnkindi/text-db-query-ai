@@ -138,6 +138,13 @@ const TABLE_HINTS = set(`
   READCOMMITTEDLOCK READUNCOMMITTED REPEATABLEREAD SERIALIZABLE SNAPSHOT NOWAIT FORCESEEK
   FORCESCAN NOEXPAND INDEX KEEPIDENTITY KEEPDEFAULTS IGNORE_CONSTRAINTS IGNORE_TRIGGERS
 `);
+/** MySQL index hint verbs: `USE|FORCE|IGNORE INDEX|KEY [FOR ...] (names)`. */
+const MYSQL_HINT_VERBS = set('USE FORCE IGNORE');
+/** T-SQL `FOR XML` / `FOR JSON` options, which are syntax, not columns. */
+const FOR_XML_JSON_OPTIONS = set(`
+  PATH AUTO RAW EXPLICIT ROOT TYPE ELEMENTS XSINIL ABSENT BINARY BASE64 XMLDATA XMLSCHEMA
+  INCLUDE_NULL_VALUES WITHOUT_ARRAY_WRAPPER
+`);
 const INSERT_MODIFIERS = set('LOW_PRIORITY DELAYED HIGH_PRIORITY IGNORE');
 const DELETE_MODIFIERS = set('LOW_PRIORITY QUICK IGNORE');
 const DDL_TABLE_STATEMENTS = set('TRUNCATE LOCK COPY DROP ALTER CREATE');
@@ -407,7 +414,15 @@ class StatementAnalyzer {
             case 'OVER':
             case 'AGAINST':
             case 'COLUMNS':
+            case 'MEMBER':
+            case 'OUTPUT':
+            case 'PIVOT':
+            case 'UNPIVOT':
               this.miscIdx.push(i);
+              break;
+            case 'FOR':
+              // Only FOR XML / FOR JSON have options to skip; other FORs are left to the passes that read them.
+              if (isWord(t[i + 1], 'XML') || isWord(t[i + 1], 'JSON')) this.miscIdx.push(i);
               break;
           }
           break;
@@ -909,9 +924,77 @@ class StatementAnalyzer {
           k += 2;
           continue;
         }
+        const afterHint = this.skipIndexHint(k);
+        if (afterHint > k) {
+          k = afterHint;
+          continue;
+        }
         if (this.isRegionEnd(k, isUpdate)) return;
       }
       k++;
+    }
+  }
+
+  /**
+   * An index or table hint at `k`, after a table item: MySQL `USE|FORCE|IGNORE
+   * INDEX|KEY [FOR JOIN|FOR ORDER BY|FOR GROUP BY] (names)`, SQLite
+   * `INDEXED BY name` and T-SQL `WITH (NOLOCK, INDEX(name))`. Index names are
+   * not columns. Returns the index after the hint, or `k` when there is none.
+   */
+  private skipIndexHint(k: number): number {
+    const { t, dialect } = this;
+    const v = t[k].value;
+    if (
+      MYSQL_HINT_VERBS.has(v) &&
+      (dialect === 'mysql' || dialect === 'generic') &&
+      (isWord(t[k + 1], 'INDEX') || isWord(t[k + 1], 'KEY'))
+    ) {
+      let j = k + 2;
+      if (isWord(t[j], 'FOR')) {
+        // FOR JOIN must not start a join: the group after it holds index names, not a table.
+        if (isWord(t[j + 1], 'JOIN')) j += 2;
+        else if ((isWord(t[j + 1], 'ORDER') || isWord(t[j + 1], 'GROUP')) && isWord(t[j + 2], 'BY')) j += 3;
+        else return k;
+      }
+      if (!isPunct(t[j], '(')) return k;
+      for (let m = k; m < j; m++) this.role[m] = R_SKIP;
+      this.skipGroupNames(j);
+      return this.groupEnd(j) + 1;
+    }
+    if (v === 'INDEXED' && (dialect === 'sqlite' || dialect === 'generic') && isWord(t[k + 1], 'BY') && isName(t[k + 2])) {
+      this.role[k] = R_SKIP;
+      this.role[k + 1] = R_SKIP;
+      this.role[k + 2] = R_SKIP;
+      return k + 3;
+    }
+    if (v === 'WITH' && isPunct(t[k + 1], '(') && (dialect === 'mssql' || dialect === 'generic')) {
+      this.markTableHints(k + 1);
+      return this.groupEnd(k + 1) + 1;
+    }
+    return k;
+  }
+
+  /** T-SQL table hints in the group at `o`: the index names in INDEX(...), INDEX = name and FORCESEEK(...). */
+  private markTableHints(o: number): void {
+    const { t, parent } = this;
+    const close = this.groupEnd(o);
+    for (let k = o + 1; k < close; k++) {
+      if (parent[k] !== o || t[k].type !== 'word') continue;
+      if (t[k].value === 'INDEX') {
+        if (isPunct(t[k + 1], '(')) this.skipGroupNames(k + 1);
+        else if (isOperator(t[k + 1], '=') && isName(t[k + 2])) this.role[k + 2] = R_SKIP;
+      } else if (t[k].value === 'FORCESEEK' && isPunct(t[k + 1], '(')) {
+        this.skipGroupNames(k + 1);
+      }
+    }
+  }
+
+  /** Mark the names inside the group at `o` as not-a-column. Names followed by `(` keep their role, so calls are still seen. */
+  private skipGroupNames(o: number): void {
+    const t = this.t;
+    const close = this.groupEnd(o);
+    for (let k = o + 1; k < close; k++) {
+      if (isName(t[k]) && this.role[k] === R_NONE && !isPunct(t[k + 1], '(')) this.role[k] = R_SKIP;
     }
   }
 
@@ -969,6 +1052,16 @@ class StatementAnalyzer {
     }
     if (j >= limit) return j;
     const tok = t[j];
+    // MySQL `t USE INDEX (a), IGNORE INDEX (b)`: a hint after a comma, not a table (the verbs are reserved there).
+    if (
+      j === k &&
+      this.dialect === 'mysql' &&
+      tok.type === 'word' &&
+      MYSQL_HINT_VERBS.has(tok.value) &&
+      (isWord(t[j + 1], 'INDEX') || isWord(t[j + 1], 'KEY'))
+    ) {
+      return k;
+    }
     if (isPunct(tok, '(')) {
       const close = this.groupEnd(j);
       // Derived tables are read by the passes that see their own FROM; a
@@ -987,7 +1080,11 @@ class StatementAnalyzer {
       return this.parseAlias(Math.min(after, limit), limit, true, null);
     }
     const p = this.addTable(nm.parts, false);
-    if (after < limit && isPunct(t[after], '(')) after = this.groupEnd(after) + 1; // FROM t (NOLOCK)
+    if (after < limit && isPunct(t[after], '(')) {
+      // FROM t (NOLOCK)
+      this.markTableHints(after);
+      after = this.groupEnd(after) + 1;
+    }
     return this.parseAlias(Math.min(after, limit), limit, true, p);
   }
 
@@ -1030,7 +1127,9 @@ class StatementAnalyzer {
     if (p) p.ref.alias = nameOf(t[a]);
     let k = a + 1;
     if (allowColumns && k < limit && isPunct(t[k], '(')) {
-      if (!this.isHintGroup(k)) this.markColumnList(k); // T-SQL `FROM t x (NOLOCK)` is a hint, not columns
+      // T-SQL `FROM t x (NOLOCK)` is a hint, not columns
+      if (this.isHintGroup(k)) this.markTableHints(k);
+      else this.markColumnList(k);
       k = this.groupEnd(k) + 1;
     }
     return Math.min(k, limit);
@@ -1141,6 +1240,27 @@ class StatementAnalyzer {
             this.jsonTableColumns(i + 1);
           }
           break;
+        case 'MEMBER':
+          // MySQL `value MEMBER OF (json_array)` is an operator; elsewhere `member` is an ordinary name.
+          if (isWord(next, 'OF') && (dialect === 'mysql' || dialect === 'generic')) role[i] = R_SKIP;
+          break;
+        case 'OUTPUT':
+          // T-SQL DML `OUTPUT inserted.col, deleted.col`; a column named output is never followed by inserted./deleted.
+          if (
+            (dialect === 'mssql' || dialect === 'generic') &&
+            (isWord(next, 'INSERTED') || isWord(next, 'DELETED')) &&
+            isPunct(t[i + 2], '.')
+          ) {
+            role[i] = R_SKIP;
+          }
+          break;
+        case 'PIVOT':
+        case 'UNPIVOT':
+          if (isPunct(next, '(')) this.pivotClause(i + 1, v === 'UNPIVOT');
+          break;
+        case 'FOR':
+          if (dialect === 'mssql' || dialect === 'generic') this.forXmlJsonOptions(i + 2);
+          break;
       }
     }
     // Functions whose arguments hold types or date parts
@@ -1191,6 +1311,61 @@ class StatementAnalyzer {
     }
   }
 
+  /**
+   * `PIVOT (agg FOR col IN ([a], [b]))`: the IN list names the output columns,
+   * so they are aliases. `UNPIVOT (value FOR name IN (cols))`: `value` and
+   * `name` are the new columns; the IN list holds real source columns and is
+   * still checked.
+   */
+  private pivotClause(o: number, unpivot: boolean): void {
+    const { t, parent } = this;
+    const close = this.groupEnd(o);
+    // The pivoted result's alias, also without AS: `PIVOT (...) p`.
+    if (close < this.n) this.parseAlias(close + 1, this.levelEnd(o), false, null);
+    let forAt = -1;
+    for (let k = o + 1; k < close; k++) {
+      if (parent[k] === o && isWord(t[k], 'FOR')) {
+        forAt = k;
+        break;
+      }
+    }
+    if (forAt < 0) return;
+    if (unpivot) {
+      if (o + 1 < forAt && isName(t[o + 1]) && this.role[o + 1] === R_NONE) this.markAlias(o + 1);
+      if (isName(t[forAt + 1]) && this.role[forAt + 1] === R_NONE) this.markAlias(forAt + 1);
+      return;
+    }
+    let inAt = forAt + 1;
+    while (inAt < close && !(parent[inAt] === o && isWord(t[inAt], 'IN'))) inAt++;
+    const list = inAt + 1;
+    if (inAt >= close || !isPunct(t[list], '(')) return;
+    const end = this.groupEnd(list);
+    for (let k = list + 1; k < end; k++) {
+      if (parent[k] === list && isName(t[k]) && this.role[k] === R_NONE && !isPunct(t[k + 1], '.')) this.markAlias(k);
+    }
+  }
+
+  /** `FOR XML PATH(''), TYPE` / `FOR JSON PATH, ROOT('x')`: the option words starting at `k`. */
+  private forXmlJsonOptions(k: number): void {
+    const t = this.t;
+    while (k < this.n && t[k].type === 'word' && FOR_XML_JSON_OPTIONS.has(t[k].value) && this.role[k] === R_NONE) {
+      // Option arguments are string literals (PATH(''), ROOT('orders')), so the group is skipped whole.
+      this.role[k] = R_SKIP;
+      k++;
+      if (isPunct(t[k], '(')) k = this.groupEnd(k) + 1;
+      if (isPunct(t[k], ',')) k++;
+    }
+  }
+
+  /** `MAX` in the length of a type (`NVARCHAR(MAX)`, `VARBINARY(MAX)`) at the group opened at `o`. */
+  private typeLength(o: number): void {
+    const { t, parent } = this;
+    const close = this.groupEnd(o);
+    for (let k = o + 1; k < close; k++) {
+      if (parent[k] === o && isWord(t[k], 'MAX') && !isPunct(t[k + 1], '(')) this.role[k] = R_SKIP;
+    }
+  }
+
   /** CAST(x AS type): everything after AS is a type. */
   private castType(o: number): void {
     const t = this.t;
@@ -1198,7 +1373,10 @@ class StatementAnalyzer {
     for (let k = o + 1; k < close; k = this.skipGroup(k) + 1) {
       if (!isWord(t[k], 'AS')) continue;
       this.role[k] = R_SKIP;
-      for (let m = k + 1; m < close; m = this.skipGroup(m) + 1) if (isName(t[m])) this.role[m] = R_SKIP;
+      for (let m = k + 1; m < close; m = this.skipGroup(m) + 1) {
+        if (isName(t[m])) this.role[m] = R_SKIP;
+        else if (isPunct(t[m], '(') && isName(t[m - 1])) this.typeLength(m);
+      }
       return;
     }
   }
@@ -1213,6 +1391,7 @@ class StatementAnalyzer {
     if (!(isPunct(next, ',') || isWord(next, 'FROM') || (typeArgument && isPunct(next, '(')))) return;
     if (always || this.dialect === 'mssql' || (tok.type === 'word' && DATEPART_NAMES.has(tok.value))) {
       this.role[k] = R_SKIP;
+      if (typeArgument && isPunct(next, '(')) this.typeLength(k + 1);
     }
   }
 
@@ -1272,6 +1451,19 @@ class StatementAnalyzer {
           continue;
         }
         if (this.isSelectEnd(k)) return;
+      }
+      if (
+        k === itemStart &&
+        this.dialect === 'mssql' &&
+        isName(tok) &&
+        role[k] === R_NONE &&
+        (tok.type === 'quoted' || !SQL_KEYWORDS.has(tok.value)) &&
+        isOperator(t[k + 1], '=')
+      ) {
+        // T-SQL `SELECT alias = expression` names the item (elsewhere `a = b` is a comparison).
+        this.markAlias(k);
+        k++;
+        continue;
       }
       if (tok.type === 'operator') {
         if (tok.value === '*' && k === itemStart && this.isItemEnd(k + 1, limit)) this.out.addStar('');
