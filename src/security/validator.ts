@@ -2,15 +2,29 @@ import {
   SecurityConfig,
   UserContext,
   QueryOperation,
+  DatabaseType,
+  DatabaseSchema,
 } from '../types';
+
+/**
+ * Optional context that makes validation dialect- and schema-aware.
+ */
+export interface SecurityValidatorOptions {
+  /** SQL dialect used to tokenize queries. Default: a generic dialect. */
+  databaseType?: DatabaseType;
+  /** Schema used to expand `*` for restricted/sensitive column checks and to qualify RLS filters. */
+  schema?: DatabaseSchema;
+}
 
 /**
  * Security validator for database queries
  */
 export class SecurityValidator {
   private config: SecurityConfig;
+  private options: SecurityValidatorOptions;
 
-  constructor(config: SecurityConfig = {}) {
+  constructor(config: SecurityConfig = {}, options: SecurityValidatorOptions = {}) {
+    this.options = options;
     this.config = {
       allowedOperations: ['SELECT'],
       allowedTables: [],

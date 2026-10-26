@@ -1,7 +1,11 @@
+import { DatabaseType } from '../types';
+
 /**
  * Query sanitizer to clean and normalize SQL queries
  */
 export class QuerySanitizer {
+  constructor(private databaseType?: DatabaseType) {}
+
   /**
    * Sanitize a SQL query
    */
@@ -132,5 +136,13 @@ export class QuerySanitizer {
       return `${query} LIMIT ${limit}`;
     }
     return query;
+  }
+
+  /**
+   * Make sure a SELECT returns at most `limit` rows: add a limit if missing,
+   * lower an existing one that is larger. (Foundation stub; see design doc.)
+   */
+  enforceLimit(query: string, limit: number): string {
+    return this.addLimitIfMissing(query, limit);
   }
 }
