@@ -5,11 +5,9 @@
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "private": false,
-  "license": "MIT",
-  "author": {
-    "name": "Jacques Nyilinkindi",
-    "email": "jacknyilinkindi@gmail.com",
-    "url": "https://github.com/jnkindi"
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
   },
   "files": [
     "dist",
@@ -30,10 +28,6 @@
     "lint": "tsc --noEmit",
     "prepublishOnly": "npm run build && npm run test"
   },
-  "bugs": {
-    "url": "https://github.com/jnkindi/text-db-query-ai/issues"
-  },
-  "homepage": "https://github.com/jnkindi/text-db-query-ai#readme",
   "keywords": [
     "database",
     "query",
@@ -51,7 +45,11 @@
     "sqlite",
     "sql-generator"
   ],
-  "author": "jnkindi",
+  "author": {
+    "name": "Jacques Nyilinkindi",
+    "email": "jacknyilinkindi@gmail.com",
+    "url": "https://github.com/jnkindi"
+  },
   "license": "MIT",
   "dependencies": {
     "@anthropic-ai/sdk": "^1.3.0",
