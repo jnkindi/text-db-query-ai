@@ -1,0 +1,49 @@
+// Schema from the 0.0.1 review. 0.0.1 produced fake columns (unique, Uuid,
+// Sensitive, below), dropped real ones and lowercased the table names.
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+enum Role {
+  USER
+  ADMIN
+}
+
+/// A registered account
+model User {
+  id        Int      @id @default(autoincrement())
+  email     String   @unique
+  name      String?
+  role      Role     @default(USER)
+  // Sensitive data below
+  password  String   @map("password_hash")
+  orders    Order[]
+  settings  Json     @default("{}")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@map("users")
+}
+
+model Order {
+  id        String   @id @default(uuid()) @db.Uuid
+  userId    Int      @map("user_id")
+  user      User     @relation(fields: [userId], references: [id])
+  total     Decimal  @db.Decimal(10, 2)
+  location  Unsupported("point")?
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+  @@map("orders")
+}
+
+model OrderItem {
+  orderId   String
+  productId Int
+  quantity  Int
+  @@id([orderId, productId])
+}

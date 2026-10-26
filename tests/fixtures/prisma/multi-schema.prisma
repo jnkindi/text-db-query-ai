@@ -1,0 +1,22 @@
+// Parser fixture: models in two PostgreSQL schemas.
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+  schemas  = ["public", "billing"]
+}
+
+model Account {
+  id       Int       @id
+  invoices Invoice[]
+
+  @@schema("public")
+}
+
+model Invoice {
+  id        Int     @id
+  accountId Int     @map("account_id")
+  account   Account @relation(fields: [accountId], references: [id])
+
+  @@map("invoices")
+  @@schema("billing")
+}
