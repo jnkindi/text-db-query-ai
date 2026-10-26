@@ -1,47 +1,37 @@
 text-db-query-ai
-Copyright (c) 2025 jnkindi
+Copyright (c) 2024-2026 jnkindi
 
-This software contains code from several open source projects:
+This package is licensed under the MIT License (see LICENSE).
 
---------------------------------------------------------------------------------
-
-OpenAI Node.js SDK
-Copyright (c) 2023 OpenAI
-License: Apache-2.0
-Repository: https://github.com/openai/openai-node
+It contains no source code copied from other projects. Its runtime
+dependencies are installed by npm as separate packages, each under its own
+license, which ships in the package's directory under node_modules.
 
 --------------------------------------------------------------------------------
 
-Anthropic TypeScript SDK
-Copyright (c) 2023 Anthropic
-License: MIT
-Repository: https://github.com/anthropics/anthropic-sdk-typescript
+Runtime dependencies
+
+openai (OpenAI Node.js SDK)
+  License:    Apache-2.0
+  Copyright:  OpenAI
+  Repository: https://github.com/openai/openai-node
+
+@anthropic-ai/sdk (Anthropic TypeScript SDK)
+  License:    Apache-2.0 (from version 1.0.0; earlier versions were MIT)
+  Copyright:  Anthropic, PBC.
+  Repository: https://github.com/anthropics/anthropic-sdk-typescript
+
+When text-db-query-ai 0.1.0 was released, the packages these two depend on
+were licensed under MIT, Apache-2.0 or the Unlicense. Run
+`npm ls --omit=dev --all` in your project to see the packages actually
+installed, and check each one's license field.
+
+Optional peer dependencies (pg, mysql2, sqlite3, @prisma/client) are not
+installed by this package. If you install them, their own licenses apply.
 
 --------------------------------------------------------------------------------
 
-Additional Dependencies:
+Security
 
-This software also includes dependencies licensed under:
-- MIT License (341 packages)
-- ISC License (62 packages)
-- BSD-3-Clause License (15 packages)
-- BSD-2-Clause License (4 packages)
-- Apache-2.0 License (9 packages)
-
-For a complete list of dependencies and their licenses, run:
-  npx license-checker --production
-
-All third-party licenses are available in their respective packages within the
-node_modules directory and are preserved in distributed versions of this software.
-
---------------------------------------------------------------------------------
-
-SECURITY NOTICE:
-
-This package uses environment variables for API key management. Users must:
-1. Never commit .env files containing actual API keys
-2. Keep .env in .gitignore
-3. Rotate API keys if exposed
-4. Use appropriate access controls for production deployments
-
-For security concerns, please see SECURITY.md or contact the maintainers.
+To report a vulnerability, follow SECURITY.md:
+https://github.com/jnkindi/text-db-query-ai/blob/main/SECURITY.md
