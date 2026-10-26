@@ -179,6 +179,7 @@ const REPAIRABLE_MESSAGE = new RegExp(
     'column .{1,200} does not exist',
     'relation .{1,200} does not exist',
     'function .{1,200} does not exist',
+    'operator does not exist',
     'syntax error',
     'no such (?:column|table|function)',
     'ambiguous column',
@@ -198,14 +199,22 @@ const REPAIRABLE_MESSAGE = new RegExp(
   'i'
 );
 
-/** Whether a database error is a schema or syntax error the model may be able to fix. */
-function isRepairableError(error: any): boolean {
+/** How many `cause` links isRepairableError follows (a cycle ends there too). */
+const MAX_CAUSE_DEPTH = 3;
+
+/**
+ * Whether a database error is a schema or syntax error the model may be able
+ * to fix. Adapters that wrap the driver error (PrismaAdapter, custom ones)
+ * keep it as `cause`, which is checked as well.
+ */
+function isRepairableError(error: any, depth = 0): boolean {
   if (!error) return false;
   for (const code of [error.code, error.sqlState, error.meta?.code]) {
     if (typeof code === 'string' && REPAIRABLE_CODES.has(code)) return true;
   }
   if (REPAIRABLE_MYSQL_ERRNOS.has(error.errno) || REPAIRABLE_MSSQL_NUMBERS.has(error.number)) return true;
-  return REPAIRABLE_MESSAGE.test(String(error.message ?? error));
+  if (REPAIRABLE_MESSAGE.test(String(error.message ?? error))) return true;
+  return depth < MAX_CAUSE_DEPTH && typeof error === 'object' && isRepairableError(error.cause, depth + 1);
 }
 
 /** The text of a database error, with the driver's hint when it gives one. */

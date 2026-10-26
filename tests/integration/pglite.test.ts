@@ -6,8 +6,9 @@
  */
 
 import { DatabaseIntrospectionAdapter, PrismaAdapter } from '../../src/adapters';
+import { ChatbotHelper } from '../../src/helpers/easy-setup';
 import { SecurityValidator } from '../../src/security';
-import { DatabaseSchema, TableSchema } from '../../src/types';
+import { DatabaseSchema, QueryResult, TableSchema } from '../../src/types';
 import {
   COVERAGE_CONFIG,
   COVERAGE_KEEPS_MEANING,
@@ -298,6 +299,50 @@ describe('PGlite (Postgres 18)', () => {
         ['ada@example.com']
       );
       expect(rows).toEqual([{ id: BigInt(1), displayName: 'Ada' }]);
+    });
+  });
+
+  describe('ChatbotHelper execution repair', () => {
+    /** Mimics Prisma's $queryRawUnsafe failing on Postgres: P2010, with the SQLSTATE in meta.code. */
+    const failingLikePrisma = {
+      $queryRawUnsafe: async (sql: string, ...values: unknown[]) => {
+        try {
+          return (await db.query(sql, values)).rows;
+        } catch (error: any) {
+          throw Object.assign(
+            new Error(
+              `\nInvalid \`prisma.$queryRawUnsafe()\` invocation:\n\n\nRaw query failed. Code: \`${error.code}\`. Message: \`ERROR: ${error.message}\``
+            ),
+            { name: 'PrismaClientKnownRequestError', code: 'P2010', meta: { code: error.code, message: `ERROR: ${error.message}` } }
+          );
+        }
+      },
+    };
+
+    const select = (query: string): QueryResult => ({
+      query,
+      explanation: 'explained',
+      warnings: [],
+      metadata: { operation: 'SELECT', tables: ['User'] },
+    });
+
+    // A common model mistake: comparing a text column with a number (SQLSTATE 42883).
+    it.each([
+      ['pg', () => new DatabaseIntrospectionAdapter(db, 'postgres')],
+      ['Prisma', () => new PrismaAdapter(failingLikePrisma, 'postgres')],
+    ])('repairs "operator does not exist" through %s', async (_name, adapter) => {
+      const generator = {
+        generateQuery: jest.fn().mockResolvedValue(select('SELECT id FROM "User" WHERE email = 5')),
+        repairQuery: jest.fn().mockResolvedValue(select(`SELECT id FROM "User" WHERE email = 'ada@example.com'`)),
+        generateQueryWithExplanation: jest.fn(),
+        explainQuery: jest.fn(),
+      };
+
+      const result = await new ChatbotHelper(generator as any, adapter(), { repairAttempts: 1 }).ask('user with email 5');
+
+      expect(generator.repairQuery).toHaveBeenCalledTimes(1);
+      expect(generator.repairQuery.mock.calls[0][2]).toContain('operator does not exist: text = integer');
+      expect(result.results).toEqual([{ id: 1 }]);
     });
   });
 

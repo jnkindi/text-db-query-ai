@@ -53,6 +53,10 @@ export class PrismaAdapter implements ORMAdapter {
    * `?` on MySQL and SQLite, `@P1` on SQL Server). Results are returned as
    * Prisma gives them (BigInt for integer aggregates, for example).
    *
+   * A failure is thrown as an Error with the 0.0.1 message ("Failed to execute
+   * query: ..."), carrying the Prisma error's `code` and `meta` when it has
+   * them, and the Prisma error itself as `cause`.
+   *
    * @param query - SQL to run
    * @param parameters - Values bound to the placeholders
    */
@@ -63,7 +67,7 @@ export class PrismaAdapter implements ORMAdapter {
       }
       return await this.prisma.$queryRawUnsafe(query);
     } catch (error: any) {
-      throw new Error(`Failed to execute query: ${error.message}`);
+      throw wrapQueryError(error);
     }
   }
 
@@ -73,6 +77,20 @@ export class PrismaAdapter implements ORMAdapter {
   getDatabaseType(): string {
     return this.databaseType;
   }
+}
+
+/**
+ * The executeQuery error for a failed Prisma call. The database's own error
+ * code is in `meta.code` of a P2010 error (the SQLSTATE on Postgres), which
+ * ChatbotHelper reads to tell a schema or syntax error it can repair from, say,
+ * a permission error. `cause` is not enumerable, as with `new Error(message, { cause })`.
+ */
+function wrapQueryError(error: any): Error {
+  const wrapped: Error & { code?: unknown; meta?: unknown } = new Error(`Failed to execute query: ${error?.message}`);
+  if (error?.code !== undefined) wrapped.code = error.code;
+  if (error?.meta !== undefined) wrapped.meta = error.meta;
+  Object.defineProperty(wrapped, 'cause', { value: error, writable: true, configurable: true });
+  return wrapped;
 }
 
 /**
