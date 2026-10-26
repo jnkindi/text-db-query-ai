@@ -162,6 +162,31 @@ describe('restrictedColumns', () => {
     }
   });
 
+  it('does not count a * or t.* that returns no column values', async () => {
+    const cfg: SecurityConfig = { restrictedColumns: ['password'] };
+    for (const sql of [
+      'SELECT o.id FROM orders o WHERE EXISTS (SELECT * FROM users u WHERE u.id = o.user_id) LIMIT 1',
+      'SELECT o.id FROM orders o WHERE NOT EXISTS (SELECT * FROM users u WHERE u.id = o.user_id) LIMIT 1',
+      'SELECT o.id, COUNT(u.*) FROM orders o JOIN users u ON u.id = o.user_id GROUP BY o.id LIMIT 1',
+      'SELECT COUNT(DISTINCT u.*) FROM users u LIMIT 1',
+    ]) {
+      expect({ sql, errors: (await check(sql, cfg, { schema })).errors }).toEqual({ sql, errors: [] });
+    }
+    // Still restricted: the values can be returned or compared
+    for (const sql of [
+      'SELECT * FROM users LIMIT 1',
+      'SELECT u.* FROM users u LIMIT 1',
+      'SELECT id FROM orders WHERE user_id IN (SELECT * FROM users) LIMIT 1',
+      'SELECT o.id FROM orders o WHERE EXISTS (SELECT * FROM users u WHERE u.password = 1) LIMIT 1',
+      'SELECT array_agg(u.*) FROM users u LIMIT 1',
+    ]) {
+      expect({ sql, errors: (await check(sql, cfg, { schema })).errors.join() }).toEqual({
+        sql,
+        errors: expect.stringContaining('Query accesses restricted columns: password'),
+      });
+    }
+  });
+
   it('reaches columns through * by name fragment too', async () => {
     const r = await check('SELECT * FROM users LIMIT 1', { restrictedColumns: ['password'] }, { schema });
     expect(r.errors.join()).toMatch(/restricted columns: password/);

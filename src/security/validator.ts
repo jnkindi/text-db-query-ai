@@ -423,6 +423,8 @@ function bareStars(s: Shape): number[] {
   for (let i = 0; i < t.length; i++) {
     const isSelect = isWordAt(t, i, 'SELECT');
     if (!isSelect && !isWordAt(t, i, 'RETURNING')) continue;
+    // The select list of EXISTS (SELECT * ...) is never evaluated or returned
+    if (isSelect && isPunctAt(t, i - 1, '(') && isWordAt(t, i - 2, 'EXISTS')) continue;
     const d = depth[i];
     let k = isSelect ? selectListStart(s, i) : i + 1;
     let itemStart = k;
@@ -1066,8 +1068,21 @@ export class SecurityValidator {
     const out = new Set<TableReference>();
     const { analysis } = ctx;
 
-    for (const q of analysis.starQualifiers) {
-      if (q !== '') for (const ref of this.resolveName(ctx, q)) out.add(ref);
+    // t.* exposes every column of t, except as the argument of COUNT, which only counts rows
+    if (analysis.starQualifiers.some((q) => q !== '')) {
+      for (const s of ctx.shapes) {
+        const t = s.t;
+        for (let k = 2; k < t.length; k++) {
+          const tok = t[k];
+          if (tok.type !== 'operator' || tok.value !== '*' || !isPunctAt(t, k - 1, '.') || !isNameToken(t[k - 2])) continue;
+          let a = k - 2;
+          while (a >= 2 && isPunctAt(t, a - 1, '.') && isNameToken(t[a - 2])) a -= 2;
+          a--;
+          if (isWordAt(t, a, 'DISTINCT')) a--;
+          if (isPunctAt(t, a, '(') && isWordAt(t, a - 1, 'COUNT') && isPunctAt(t, k + 1, ')')) continue;
+          for (const ref of this.resolveName(ctx, nameOf(t[k - 2]))) out.add(ref);
+        }
+      }
     }
 
     // Columns of the query's tables, so `SELECT status FROM status` is a column, not the row
