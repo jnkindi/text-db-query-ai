@@ -131,7 +131,7 @@ describe('prompt', () => {
     expect(system).toContain('Restricted columns (never use): ssn');
     expect(system).toContain('Sensitive columns (never select or expose): User.password');
     expect(system).toContain('At most 100 rows can be returned.');
-    expect(system).toContain("Question: How many orders are paid?\nSQL: SELECT COUNT(*) FROM orders WHERE status = 'paid'");
+    expect(system).toContain("<example>\n<question>How many orders are paid?</question>\nSELECT COUNT(*) FROM orders WHERE status = 'paid'\n</example>");
     expect(system).toContain('<instructions>\nRevenue means SUM(order_items.price * order_items.quantity).\n</instructions>');
     expect(system).not.toMatch(/RIGHT JOIN/i);
   });
