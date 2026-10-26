@@ -137,9 +137,37 @@ describe('OpenAIProvider', () => {
       'gpt-3.5-turbo',
       'GPT-4o-mini',
       'ft:gpt-4o-mini-2024-07-18:acme::abc123',
-    ])('sends temperature 0.1 for the non-reasoning model %s', async (model) => {
+    ])('sends temperature 0.1 and the 0.0.1 token limit for the non-reasoning model %s', async (model) => {
       await provider({ model }).generate('q');
       expect(sent().temperature).toBe(0.1);
+      expect(sent().max_completion_tokens).toBe(1000);
+    });
+
+    it('sends the 0.0.1 request for a pinned gpt-3.5-turbo, apart from the token limit field', async () => {
+      await provider({ model: 'gpt-3.5-turbo' }).generate('q');
+      expect(sent()).toEqual({
+        model: 'gpt-3.5-turbo',
+        messages: [
+          { role: 'system', content: DEFAULT_SYSTEM },
+          { role: 'user', content: 'q' },
+        ],
+        max_completion_tokens: 1000,
+        temperature: 0.1,
+      });
+    });
+
+    it('lets maxTokens override the 0.0.1 limit of non-reasoning models', async () => {
+      await provider({ model: 'gpt-4.1', maxTokens: 16000 }).generate('q');
+      expect(sent().max_completion_tokens).toBe(16000);
+    });
+
+    it('uses the 0.0.1 limit for non-reasoning models on other endpoints too', async () => {
+      await provider({ baseURL: 'https://gateway.example.com/v1', model: 'gpt-4o-mini' }).generate('q');
+      expect(sent().max_tokens).toBe(1000);
+    });
+
+    it.each(['gpt-6-luna', 'gpt-5.4-mini', 'o3', 'gpt-40'])('keeps the 8192 default for %s', async (model) => {
+      await provider({ model }).generate('q');
       expect(sent().max_completion_tokens).toBe(8192);
     });
 
@@ -250,7 +278,7 @@ describe('OpenAIProvider', () => {
       expect(mockCreate).toHaveBeenCalledTimes(2);
       expect(sent(0).temperature).toBe(0.1);
       expect(sent(1)).not.toHaveProperty('temperature');
-      expect(sent(1).max_completion_tokens).toBe(8192);
+      expect(sent(1).max_completion_tokens).toBe(1000);
 
       await p.generateWithSystem('sys', 'q2');
       expect(mockCreate).toHaveBeenCalledTimes(3);
@@ -354,9 +382,13 @@ describe('OpenAIProvider', () => {
 
     it('does not retry other 400 errors', async () => {
       mockCreate.mockRejectedValue(
-        badRequest('max_tokens is too large: 999999. This model supports at most 128000 completion tokens.', 'invalid_value', 'max_tokens')
+        badRequest(
+          "This model's maximum context length is 128000 tokens. However, your messages resulted in 130000 tokens.",
+          'context_length_exceeded',
+          'messages'
+        )
       );
-      await expect(provider({ maxTokens: 999999 }).generate('q')).rejects.toMatchObject({ code: 'OPENAI_API_ERROR' });
+      await expect(provider().generate('q')).rejects.toMatchObject({ code: 'OPENAI_API_ERROR' });
       expect(mockCreate).toHaveBeenCalledTimes(1);
     });
 
@@ -383,15 +415,129 @@ describe('OpenAIProvider', () => {
     });
   });
 
+  describe('token limit above the model output limit', () => {
+    /** OpenAI's documented 400 for a token limit above what the model can write. */
+    function tooLarge(requested: number, cap: number, field = 'max_tokens') {
+      return badRequest(
+        `${field} is too large: ${requested}. This model supports at most ${cap} completion tokens, whereas you provided ${requested}.`,
+        null,
+        field
+      );
+    }
+
+    /** A server whose model writes at most `cap` tokens. */
+    function serverWithCap(cap: number) {
+      mockCreate.mockImplementation(async (params: any) => {
+        const limit = params.max_completion_tokens ?? params.max_tokens;
+        if (limit > cap) throw tooLarge(limit, cap);
+        return completion('SELECT 1');
+      });
+    }
+
+    // Regression: a 0.0.1 config naming a model with a 4096-token output cap, without maxTokens.
+    it('answers with a legacy model whose output cap is below the default maxTokens', async () => {
+      serverWithCap(4096);
+      const p = new OpenAIProvider({ provider: 'openai', apiKey: 'sk-test', model: 'gpt-3.5-turbo' });
+      await expect(p.generate('count the users')).resolves.toBe('SELECT 1');
+    });
+
+    it('retries once at the limit the server reports and remembers it', async () => {
+      serverWithCap(4096);
+      const p = provider({ baseURL: 'https://acme.openai.azure.com/openai/v1/', model: 'gpt-35-turbo' });
+
+      await expect(p.generate('q')).resolves.toBe('SELECT 1');
+      expect(mockCreate).toHaveBeenCalledTimes(2);
+      expect(sent(0).max_completion_tokens).toBe(8192);
+      expect(sent(1).max_completion_tokens).toBe(4096);
+
+      // Later requests start at the limit, without a failed attempt first.
+      await p.generateWithSystem('sys', 'q2');
+      expect(mockCreate).toHaveBeenCalledTimes(3);
+      expect(sent(2).max_completion_tokens).toBe(4096);
+    });
+
+    it('lowers an explicit maxTokens above the model limit too', async () => {
+      serverWithCap(16384);
+      await expect(provider({ model: 'gpt-4o', maxTokens: 999999 }).generate('q')).resolves.toBe('SELECT 1');
+      expect(sent(1).max_completion_tokens).toBe(16384);
+    });
+
+    it('reads the message for either token limit field, on compatible endpoints too', async () => {
+      mockCreate
+        .mockRejectedValueOnce(tooLarge(8192, 2048, 'max_completion_tokens'))
+        .mockResolvedValue(completion('SELECT 2'));
+      await expect(provider({ model: 'o3' }).generate('q')).resolves.toBe('SELECT 2');
+      expect(sent(1).max_completion_tokens).toBe(2048);
+
+      mockCreate.mockReset();
+      mockCreate
+        .mockRejectedValueOnce(badRequest('max_tokens is too large: 8192. This model supports at most 4096 completion tokens.'))
+        .mockResolvedValue(completion('SELECT 3'));
+      await expect(provider({ baseURL: 'http://localhost:8000/v1', model: 'local' }).generate('q')).resolves.toBe('SELECT 3');
+      expect(sent(1).max_tokens).toBe(4096);
+    });
+
+    it('works together with the token limit field swap', async () => {
+      mockCreate.mockImplementation(async (params: any) => {
+        if ('max_tokens' in params) {
+          throw badRequest("Unsupported parameter: 'max_tokens'", 'unsupported_parameter', 'max_tokens');
+        }
+        if (params.max_completion_tokens > 4096) throw tooLarge(params.max_completion_tokens, 4096, 'max_completion_tokens');
+        return completion('SELECT 4');
+      });
+      await expect(provider({ tokenLimitParam: 'max_tokens' }).generate('q')).resolves.toBe('SELECT 4');
+      expect(mockCreate).toHaveBeenCalledTimes(3);
+      expect(sent(2)).toMatchObject({ max_completion_tokens: 4096 });
+      expect(sent(2)).not.toHaveProperty('max_tokens');
+    });
+
+    it('lowers the limit at most once', async () => {
+      mockCreate.mockImplementation(async (params: any) => {
+        const limit = params.max_completion_tokens;
+        throw tooLarge(limit, limit - 1);
+      });
+      const failure = await provider().generate('q').catch((e) => e);
+      expect(mockCreate).toHaveBeenCalledTimes(2);
+      expect(failure).toBeInstanceOf(TextToQueryError);
+      expect(failure.code).toBe('OPENAI_API_ERROR');
+    });
+
+    it('does not retry when the reported limit is not below the one sent', async () => {
+      mockCreate.mockRejectedValue(tooLarge(500, 500));
+      await expect(provider({ maxTokens: 500 }).generate('q')).rejects.toMatchObject({ code: 'OPENAI_API_ERROR' });
+      expect(mockCreate).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not read the limit from errors other than 400', async () => {
+      mockCreate.mockRejectedValue(
+        Object.assign(new Error('500 max_tokens is too large: 8192. This model supports at most 4096 completion tokens.'), { status: 500 })
+      );
+      await expect(provider().generate('q')).rejects.toMatchObject({ code: 'OPENAI_API_ERROR' });
+      expect(mockCreate).toHaveBeenCalledTimes(1);
+    });
+  });
+
   describe('responses', () => {
     it('returns trimmed content', async () => {
       mockCreate.mockResolvedValue(completion('  SELECT * FROM users\n'));
       await expect(provider().generate('q')).resolves.toBe('SELECT * FROM users');
     });
 
-    it('returns content even when finish_reason is length', async () => {
-      mockCreate.mockResolvedValue(completion('SELECT id FROM', { finish_reason: 'length' }));
-      await expect(provider().generate('q')).resolves.toBe('SELECT id FROM');
+    it('rejects content cut off by the token limit, with the partial text', async () => {
+      mockCreate.mockResolvedValue(completion('SELECT id, total FROM orders\n', { finish_reason: 'length' }));
+      const error = await provider({ maxTokens: 300 }).generate('q').catch((e) => e);
+      expect(error).toBeInstanceOf(TextToQueryError);
+      expect(error.code).toBe('OPENAI_EMPTY_RESPONSE');
+      expect(error.details).toEqual({ reason: 'length', partialText: 'SELECT id, total FROM orders' });
+      expect(error.message).toContain('300');
+      expect(error.message).toContain('maxTokens');
+    });
+
+    it('treats whitespace cut off by the token limit as no text', async () => {
+      mockCreate.mockResolvedValue(completion('  \n', { finish_reason: 'length' }));
+      const error = await provider().generate('q').catch((e) => e);
+      expect(error.code).toBe('OPENAI_EMPTY_RESPONSE');
+      expect(error.details).toEqual({ reason: 'length' });
     });
 
     it('reports a refusal as OPENAI_EMPTY_RESPONSE with the refusal text', async () => {

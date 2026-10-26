@@ -15,6 +15,12 @@ const FALLBACK_BETA = 'server-side-fallback-2026-07-01';
 
 /** A 400 whose message names the fallbacks parameter or its beta header. */
 const FALLBACK_REJECTED = /fallback/i;
+/**
+ * The 400 for a max_tokens above what the model can write: "max_tokens: 16000 >
+ * 8192, which is the maximum allowed number of output tokens for ...". Captures
+ * the model's limit.
+ */
+const MAX_TOKENS_TOO_LARGE = /\bmax_tokens:\s*\d+\s*>\s*(\d+)/;
 
 type ClaudeMessage = Anthropic.Message | Anthropic.Beta.BetaMessage;
 type SystemParam = string | Array<{ type: 'text'; text: string; cache_control: { type: 'ephemeral' } }>;
@@ -41,12 +47,26 @@ function isFallbackRejection(error: any): boolean {
 }
 
 /**
+ * The model's output token limit, when a 400 response rejected `requested` as
+ * too large and names a lower limit. Undefined for any other error.
+ */
+function outputTokenLimit(error: any, requested: number): number | undefined {
+  if (error?.status !== 400) return undefined;
+  const match = MAX_TOKENS_TOO_LARGE.exec(String(error.message));
+  if (!match) return undefined;
+  const limit = Number(match[1]);
+  return Number.isSafeInteger(limit) && limit > 0 && limit < requested ? limit : undefined;
+}
+
+/**
  * Claude (Anthropic) LLM provider implementation
  */
 export class ClaudeProvider extends BaseLLMProvider {
   private client: Anthropic;
   /** Send `fallbacks: 'default'`, so a declined request is retried on Anthropic's recommended fallback model. */
   private useFallbacks: boolean;
+  /** The model's output token limit, after the API rejected a larger max_tokens. */
+  private outputTokenCap?: number;
 
   constructor(config: LLMConfig) {
     super(config);
@@ -99,21 +119,37 @@ export class ClaudeProvider extends BaseLLMProvider {
 
   /**
    * Send one message and return its text. No sampling or thinking parameters
-   * are sent: current models reject the former and always think.
+   * are sent: current models reject the former and always think. If the API
+   * rejects max_tokens as larger than the model can write, the request is
+   * retried once with the limit the API reports, and later requests use it.
    */
   private async complete(system: string, prompt: string): Promise<string> {
     try {
       const maxTokens = this.config.maxTokens ?? DEFAULT_MAX_TOKENS;
       const params: ClaudeParams = {
         model: this.config.model || this.getDefaultModel(),
-        max_tokens: maxTokens,
+        max_tokens: this.outputTokenCap === undefined ? maxTokens : Math.min(maxTokens, this.outputTokenCap),
         system: this.systemParam(system),
         messages: [{ role: 'user', content: prompt }],
       };
       if (this.config.effort) {
         params.output_config = { effort: this.config.effort };
       }
-      return readText(await this.send(params), maxTokens);
+      let lowered = false;
+      for (;;) {
+        try {
+          // A copy per attempt, since a retry changes params.
+          return readText(await this.send({ ...params }), params.max_tokens);
+        } catch (error) {
+          // An older model writes fewer tokens than the default or maxTokens.
+          // max_tokens only caps the output, so the model's own limit is equivalent.
+          const limit = lowered ? undefined : outputTokenLimit(error, params.max_tokens);
+          if (limit === undefined) throw error;
+          params.max_tokens = limit;
+          this.outputTokenCap = limit;
+          lowered = true;
+        }
+      }
     } catch (error: any) {
       if (error instanceof TextToQueryError) {
         throw error;
@@ -165,6 +201,10 @@ const ownGenerate = ClaudeProvider.prototype.generate;
 /**
  * Join the text of every text block. Thinking and fallback blocks are skipped,
  * and after a mid-answer fallback the text blocks continue one another.
+ *
+ * A response cut off by max_tokens or by the context window is an error, with
+ * the text so far in `details.partialText`: a query missing its end (a WHERE
+ * clause, say) can still be valid SQL.
  */
 function readText(message: ClaudeMessage, maxTokens: number): string {
   // A refusal can arrive after partial output, which must not be used.
@@ -185,17 +225,27 @@ function readText(message: ClaudeMessage, maxTokens: number): string {
     }
   }
   text = text.trim();
-  if (text) {
-    return text;
-  }
 
   if (message.stop_reason === 'max_tokens') {
     throw new TextToQueryError(
-      `Claude reached max_tokens (${maxTokens}) before writing a response. ` +
+      `Claude reached max_tokens (${maxTokens}) before ${text ? 'finishing the response, so it was not used' : 'writing a response'}. ` +
         'Thinking counts toward this limit: increase maxTokens or set a lower effort.',
       'CLAUDE_INVALID_RESPONSE',
-      { stopReason: 'max_tokens' }
+      text ? { stopReason: 'max_tokens', partialText: text } : { stopReason: 'max_tokens' }
     );
+  }
+  if (message.stop_reason === 'model_context_window_exceeded') {
+    throw new TextToQueryError(
+      `Claude reached the model's context window before ${text ? 'finishing the response, so it was not used' : 'writing a response'}. ` +
+        'Send a smaller schema (includeTables or excludeTables) or use a model with a larger context window.',
+      'CLAUDE_INVALID_RESPONSE',
+      text
+        ? { stopReason: 'model_context_window_exceeded', partialText: text }
+        : { stopReason: 'model_context_window_exceeded' }
+    );
+  }
+  if (text) {
+    return text;
   }
   throw new TextToQueryError(
     'Unexpected response type from Claude',

@@ -167,6 +167,34 @@ describe('ClaudeProvider with @anthropic-ai/sdk', () => {
     expect(error.details).toEqual({ stopReason: 'refusal', stopDetails });
   });
 
+  it('reports a streamed answer cut off by max_tokens instead of returning it', async () => {
+    respond = () => claudeStream([{ type: 'thinking', thinking: '', signature: 'sig' }, { type: 'text', text: 'SELECT id, total FROM orders' }], 'max_tokens');
+
+    const error = await new ClaudeProvider(config).generate('Q').catch((e) => e);
+    expect(error).toBeInstanceOf(TextToQueryError);
+    expect(error.code).toBe('CLAUDE_INVALID_RESPONSE');
+    expect(error.details).toEqual({ stopReason: 'max_tokens', partialText: 'SELECT id, total FROM orders' });
+  });
+
+  it('retries at the output limit the API reports for an older model', async () => {
+    respond = (request) =>
+      request.body.max_tokens > 8192
+        ? json(400, {
+            type: 'error',
+            error: {
+              type: 'invalid_request_error',
+              message: `max_tokens: ${request.body.max_tokens} > 8192, which is the maximum allowed number of output tokens for claude-3-5-haiku-20241022`,
+            },
+          })
+        : claudeStream([{ type: 'text', text: 'SELECT 1' }]);
+
+    const provider = new ClaudeProvider({ ...config, model: 'claude-3-5-haiku-20241022' });
+    await expect(provider.generate('Q')).resolves.toBe('SELECT 1');
+    await expect(provider.generate('Q')).resolves.toBe('SELECT 1');
+    expect(requests.map((r) => r.body.max_tokens)).toEqual([16000, 8192, 8192]);
+    expect(requests.map((r) => r.headers['anthropic-beta'])).toEqual(Array(3).fill('server-side-fallback-2026-07-01'));
+  });
+
   it('maps an HTTP error to CLAUDE_API_ERROR carrying the SDK error', async () => {
     respond = () => json(401, { type: 'error', error: { type: 'authentication_error', message: 'invalid x-api-key' } });
     const { AuthenticationError } = require('@anthropic-ai/sdk');
@@ -191,14 +219,50 @@ describe('ClaudeProvider with @anthropic-ai/sdk', () => {
 describe('OpenAIProvider with openai', () => {
   const config = { provider: 'openai' as const, apiKey: 'sk-test', baseURL: 'https://api.openai.com/v1', maxRetries: 0 };
 
-  const completion = (content: string) =>
+  const completion = (content: string, finishReason = 'stop') =>
     json(200, {
       id: 'chatcmpl-1',
       object: 'chat.completion',
       created: 0,
       model: 'gpt-6-luna',
-      choices: [{ index: 0, finish_reason: 'stop', message: { role: 'assistant', content, refusal: null } }],
+      choices: [{ index: 0, finish_reason: finishReason, message: { role: 'assistant', content, refusal: null } }],
     });
+
+  /** OpenAI's documented reply to a token limit above the model's output limit. */
+  const tooLarge = (requested: number, cap: number) =>
+    json(400, {
+      error: {
+        message: `max_tokens is too large: ${requested}. This model supports at most ${cap} completion tokens, whereas you provided ${requested}.`,
+        type: 'invalid_request_error',
+        param: 'max_tokens',
+        code: null,
+      },
+    });
+
+  it('sends the 0.0.1 token limit and temperature to a pinned gpt-3.5-turbo', async () => {
+    respond = (request) => (request.body.max_completion_tokens > 4096 ? tooLarge(request.body.max_completion_tokens, 4096) : completion('SELECT 1'));
+    await expect(new OpenAIProvider({ ...config, model: 'gpt-3.5-turbo' }).generate('Q')).resolves.toBe('SELECT 1');
+
+    expect(requests).toHaveLength(1);
+    expect(requests[0].body).toMatchObject({ model: 'gpt-3.5-turbo', max_completion_tokens: 1000, temperature: 0.1 });
+  });
+
+  it('retries at the output limit the API reports, and remembers it', async () => {
+    respond = (request) => (request.body.max_completion_tokens > 4096 ? tooLarge(request.body.max_completion_tokens, 4096) : completion('SELECT 1'));
+    const provider = new OpenAIProvider({ ...config, model: 'gpt-4o-2024-05-13', maxTokens: 8192 });
+
+    await expect(provider.generate('Q')).resolves.toBe('SELECT 1');
+    await expect(provider.generate('Q')).resolves.toBe('SELECT 1');
+    expect(requests.map((r) => r.body.max_completion_tokens)).toEqual([8192, 4096, 4096]);
+  });
+
+  it('reports an answer cut off by the token limit instead of returning it', async () => {
+    respond = () => completion('SELECT id, total FROM orders', 'length');
+    const error = await new OpenAIProvider(config).generate('Q').catch((e) => e);
+    expect(error).toBeInstanceOf(TextToQueryError);
+    expect(error.code).toBe('OPENAI_EMPTY_RESPONSE');
+    expect(error.details).toEqual({ reason: 'length', partialText: 'SELECT id, total FROM orders' });
+  });
 
   it('sends max_completion_tokens to the default model', async () => {
     respond = () => completion('SELECT 1');

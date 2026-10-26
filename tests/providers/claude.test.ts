@@ -240,6 +240,72 @@ describe('ClaudeProvider', () => {
     });
   });
 
+  describe('max_tokens above the model output limit', () => {
+    /** The API's 400 for a max_tokens above what the model can write, as the SDK reports it. */
+    function tooLarge(requested: number, cap: number) {
+      const body = {
+        type: 'error',
+        error: {
+          type: 'invalid_request_error',
+          message: `max_tokens: ${requested} > ${cap}, which is the maximum allowed number of output tokens for claude-3-5-haiku-20241022`,
+        },
+      };
+      return Object.assign(new Error(`400 ${JSON.stringify(body)}`), { status: 400, error: body });
+    }
+
+    /** Both stream helpers answer like a model that writes at most `cap` tokens. */
+    function modelWithCap(cap: number) {
+      const stream = (params: any) => ({
+        finalMessage: () =>
+          params.max_tokens > cap ? Promise.reject(tooLarge(params.max_tokens, cap)) : Promise.resolve(message([text('SELECT 1')])),
+      });
+      mockStream.mockImplementation(stream);
+      mockBetaStream.mockImplementation(stream);
+    }
+
+    const limits = (mock: jest.Mock) => mock.mock.calls.map((call) => call[0].max_tokens);
+
+    it('retries once at the limit the API reports, with fallbacks, and remembers it', async () => {
+      modelWithCap(8192);
+      const p = provider({ model: 'claude-3-5-haiku-20241022' });
+
+      await expect(p.generate('q')).resolves.toBe('SELECT 1');
+      expect(limits(mockBetaStream)).toEqual([16000, 8192]);
+      expect(mockBetaStream.mock.calls[1][0].fallbacks).toBe('default');
+
+      // Later requests start at the limit, without a failed attempt first.
+      await p.generateWithSystem('SYS', 'Q');
+      expect(limits(mockBetaStream)).toEqual([16000, 8192, 8192]);
+      expect(mockStream).not.toHaveBeenCalled();
+    });
+
+    it('retries on the non-beta API too, and lowers an explicit maxTokens', async () => {
+      modelWithCap(4096);
+      await expect(provider({ fallbacks: false, maxTokens: 64000 }).generate('q')).resolves.toBe('SELECT 1');
+      expect(limits(mockStream)).toEqual([64000, 4096]);
+    });
+
+    it('lowers the limit at most once', async () => {
+      const stream = (params: any) => ({ finalMessage: () => Promise.reject(tooLarge(params.max_tokens, params.max_tokens - 1)) });
+      mockBetaStream.mockImplementation(stream);
+      const error = await provider().generate('q').catch((e) => e);
+      expect(error).toBeInstanceOf(TextToQueryError);
+      expect(error.code).toBe('CLAUDE_API_ERROR');
+      expect(limits(mockBetaStream)).toEqual([16000, 15999]);
+    });
+
+    it('does not retry when the reported limit is not below the one sent, or the status is not 400', async () => {
+      failWith(tooLarge(16000, 16000));
+      await expect(provider().generate('q')).rejects.toMatchObject({ code: 'CLAUDE_API_ERROR' });
+      expect(mockBetaStream).toHaveBeenCalledTimes(1);
+
+      mockBetaStream.mockClear();
+      failWith(Object.assign(tooLarge(16000, 8192), { status: 500 }));
+      await expect(provider().generate('q')).rejects.toMatchObject({ code: 'CLAUDE_API_ERROR' });
+      expect(mockBetaStream).toHaveBeenCalledTimes(1);
+    });
+  });
+
   describe('generate and generateWithSystem', () => {
     it('generate sends the 0.0.1 system prompt', async () => {
       await provider({ promptCaching: false }).generate('Count users');
@@ -314,9 +380,28 @@ describe('ClaudeProvider', () => {
       expect(error.message).toContain('effort');
     });
 
-    it('returns the text when max_tokens was reached after some text', async () => {
-      respondWith(message([thinking(), text('SELECT id FROM users')], 'max_tokens'));
-      await expect(provider().generate('q')).resolves.toBe('SELECT id FROM users');
+    it('rejects text cut off by max_tokens, with the partial text', async () => {
+      respondWith(message([thinking(), text('SELECT id, total'), text(' FROM orders\n')], 'max_tokens'));
+      const error = await provider({ maxTokens: 2000 }).generate('q').catch((e) => e);
+      expect(error).toBeInstanceOf(TextToQueryError);
+      expect(error.code).toBe('CLAUDE_INVALID_RESPONSE');
+      expect(error.details).toEqual({ stopReason: 'max_tokens', partialText: 'SELECT id, total FROM orders' });
+      expect(error.message).toContain('2000');
+      expect(error.message).toContain('maxTokens');
+    });
+
+    it('rejects text cut off by the context window, with the partial text', async () => {
+      respondWith(message([text('SELECT id FROM')], 'model_context_window_exceeded'));
+      const error = await provider().generate('q').catch((e) => e);
+      expect(error.code).toBe('CLAUDE_INVALID_RESPONSE');
+      expect(error.details).toEqual({ stopReason: 'model_context_window_exceeded', partialText: 'SELECT id FROM' });
+      expect(error.message).toContain('context window');
+
+      respondWith(message([thinking()], 'model_context_window_exceeded'));
+      const empty = await provider().generate('q').catch((e) => e);
+      expect(empty.code).toBe('CLAUDE_INVALID_RESPONSE');
+      expect(empty.details).toEqual({ stopReason: 'model_context_window_exceeded' });
+      expect(empty.message).toContain('context window');
     });
 
     it('reports a response without text as CLAUDE_INVALID_RESPONSE', async () => {

@@ -13,12 +13,19 @@ type TokenLimitParam = 'max_tokens' | 'max_completion_tokens';
 /** Optional request fields that the unsupported-parameter retry removes. */
 type DroppableParam = 'temperature' | 'top_p' | 'reasoning_effort';
 
+/** Reasoning tokens count toward the limit, so current models need room to think. */
 const DEFAULT_MAX_TOKENS = 8192;
+/**
+ * The 0.0.1 default, kept for the non-reasoning models 0.0.1 users pinned:
+ * several of them (gpt-3.5-turbo, gpt-4-turbo) cannot write more than 4096
+ * tokens and reject a larger limit, and gpt-4 has an 8k context.
+ */
+const LEGACY_MAX_TOKENS = 1000;
 const DEFAULT_TEMPERATURE = 0.1;
 
 /**
- * Non-reasoning model families, which accept `temperature` without `reasoning_effort: 'none'`.
- * Fine-tuned models ("ft:gpt-4o-mini:...") match too.
+ * Non-reasoning model families, which accept `temperature` without `reasoning_effort: 'none'`
+ * and default to the 0.0.1 token limit. Fine-tuned models ("ft:gpt-4o-mini:...") match too.
  */
 const LEGACY_MODEL_PATTERN = /^(?:ft:)?(?:gpt-4o|chatgpt-4o|gpt-4\.1|gpt-4-|gpt-3\.5|gpt-4(?:$|:))/;
 
@@ -35,6 +42,12 @@ const RETRYABLE_PARAMS: ReadonlySet<string> = new Set([
 const UNSUPPORTED_MESSAGE = /unsupported/i;
 /** First retryable field named in a message such as "Unsupported parameter: 'max_tokens' ...". */
 const PARAM_IN_MESSAGE = /\b(max_completion_tokens|max_tokens|temperature|top_p|reasoning_effort)\b/;
+/**
+ * The 400 for a token limit above what the model can write: "max_tokens is too
+ * large: 8192. This model supports at most 4096 completion tokens, whereas you
+ * provided 8192." Captures the model's limit.
+ */
+const TOKEN_LIMIT_TOO_LARGE = /\b(?:max_completion_tokens|max_tokens)\b[^.]{0,40}\btoo large\b[\s\S]{0,200}?\bat most (\d+)/i;
 
 /**
  * True for api.openai.com (and its regional hosts such as eu.api.openai.com)
@@ -65,6 +78,19 @@ function unsupportedParam(error: any): string | undefined {
 }
 
 /**
+ * The model's output token limit, when a 400 response rejected `requested` as
+ * too large and names a lower limit. Undefined for any other error.
+ */
+function outputTokenLimit(error: any, requested: number): number | undefined {
+  if (!error || error.status !== 400) return undefined;
+  const message = typeof error.message === 'string' ? error.message : '';
+  const match = TOKEN_LIMIT_TOO_LARGE.exec(message);
+  if (!match) return undefined;
+  const limit = Number(match[1]);
+  return Number.isSafeInteger(limit) && limit > 0 && limit < requested ? limit : undefined;
+}
+
+/**
  * OpenAI LLM provider implementation
  */
 export class OpenAIProvider extends BaseLLMProvider {
@@ -75,6 +101,8 @@ export class OpenAIProvider extends BaseLLMProvider {
   private readonly droppedParams = new Set<DroppableParam>();
   /** Token limit field to send after the server rejected the other one. */
   private tokenLimitOverride?: TokenLimitParam;
+  /** The model's output token limit, after the server rejected a larger one. */
+  private outputTokenCap?: number;
 
   constructor(config: LLMConfig) {
     super(config);
@@ -126,12 +154,15 @@ export class OpenAIProvider extends BaseLLMProvider {
   /**
    * Send one chat completion. If the server rejects a field as unsupported
    * (for example `temperature` or `max_tokens` on a reasoning model), the field
-   * is dropped or swapped and the request is retried, once per field. The
-   * adjustment is kept for later requests on this provider.
+   * is dropped or swapped and the request is retried, once per field. If it
+   * rejects the token limit as larger than the model can write, the request is
+   * retried once with the limit the server reports. Each adjustment is kept
+   * for later requests on this provider.
    */
   private async complete(system: string, prompt: string): Promise<string> {
     const params = this.buildParams(system, prompt);
     const adjusted = new Set<string>();
+    let lowered = false;
     for (;;) {
       try {
         // A copy per attempt, since a retry changes params.
@@ -147,6 +178,20 @@ export class OpenAIProvider extends BaseLLMProvider {
           const key = param === 'max_completion_tokens' ? 'max_tokens' : param;
           if (!adjusted.has(key) && this.adjustParams(params, param)) {
             adjusted.add(key);
+            continue;
+          }
+        }
+        if (!lowered) {
+          // An older model (gpt-3.5-turbo, gpt-4-turbo, a pinned snapshot)
+          // writes fewer tokens than the default limit or maxTokens: the
+          // limit only caps the output, so the model's own limit is equivalent.
+          const field: TokenLimitParam = params.max_completion_tokens != null ? 'max_completion_tokens' : 'max_tokens';
+          const requested = params[field];
+          const limit = requested == null ? undefined : outputTokenLimit(error, requested);
+          if (limit !== undefined) {
+            params[field] = limit;
+            this.outputTokenCap = limit;
+            lowered = true;
             continue;
           }
         }
@@ -169,11 +214,13 @@ export class OpenAIProvider extends BaseLLMProvider {
       ],
     };
 
+    const legacyModel = LEGACY_MODEL_PATTERN.test(model.toLowerCase());
     const tokenLimitParam: TokenLimitParam =
       this.tokenLimitOverride ??
       this.config.tokenLimitParam ??
       (this.officialEndpoint ? 'max_completion_tokens' : 'max_tokens');
-    params[tokenLimitParam] = this.config.maxTokens ?? DEFAULT_MAX_TOKENS;
+    const maxTokens = this.config.maxTokens ?? (legacyModel ? LEGACY_MAX_TOKENS : DEFAULT_MAX_TOKENS);
+    params[tokenLimitParam] = this.outputTokenCap === undefined ? maxTokens : Math.min(maxTokens, this.outputTokenCap);
 
     const effort = this.droppedParams.has('reasoning_effort') ? undefined : this.config.reasoningEffort;
     if (effort) {
@@ -182,8 +229,7 @@ export class OpenAIProvider extends BaseLLMProvider {
 
     // Reasoning models reject temperature unless reasoning effort is 'none'.
     // Compatible endpoints keep it (Ollama, for one, defaults to 1.0 without it).
-    const sendTemperature =
-      !this.officialEndpoint || effort === 'none' || LEGACY_MODEL_PATTERN.test(model.toLowerCase());
+    const sendTemperature = !this.officialEndpoint || effort === 'none' || legacyModel;
     if (sendTemperature && !this.droppedParams.has('temperature')) {
       params.temperature = this.config.temperature ?? DEFAULT_TEMPERATURE;
     }
@@ -225,11 +271,14 @@ const ownGenerate = OpenAIProvider.prototype.generate;
 /**
  * Text of the first choice. Empty content is an OPENAI_EMPTY_RESPONSE error,
  * with `details.reason` set when the model refused or ran out of tokens.
+ * Content cut off by the token limit is one too, with `details.partialText`:
+ * a query missing its end (a WHERE clause, say) can still be valid SQL.
  */
 function readContent(response: OpenAI.ChatCompletion, params: ChatParams): string {
   const choice = response.choices[0];
   const content = choice?.message?.content;
-  if (content) {
+  const truncated = choice?.finish_reason === 'length';
+  if (content && !truncated) {
     return content.trim();
   }
 
@@ -241,8 +290,17 @@ function readContent(response: OpenAI.ChatCompletion, params: ChatParams): strin
       { reason: 'refusal', refusal }
     );
   }
-  if (choice?.finish_reason === 'length') {
+  if (truncated) {
     const limit = params.max_completion_tokens ?? params.max_tokens;
+    const partialText = content ? content.trim() : '';
+    if (partialText) {
+      throw new TextToQueryError(
+        `Incomplete response from OpenAI: the output token limit (${limit}) was reached before the response was finished, ` +
+          'so it was not used. Reasoning tokens count toward this limit: increase maxTokens or use a lower reasoningEffort.',
+        'OPENAI_EMPTY_RESPONSE',
+        { reason: 'length', partialText }
+      );
+    }
     throw new TextToQueryError(
       `No response from OpenAI: the output token limit (${limit}) was reached before any text was written. ` +
         'Reasoning tokens count toward this limit: increase maxTokens or use a lower reasoningEffort.',
