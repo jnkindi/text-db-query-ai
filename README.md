@@ -467,7 +467,7 @@ SELECT id FROM orders WHERE total > (SELECT AVG(total) FROM orders)
        (SELECT * FROM orders AS __rls WHERE __rls.user_id = 5) orders) AND user_id = 5
 ```
 
-Each UNION, INTERSECT and EXCEPT branch gets its own filter. A wrapped table lists its columns only when restricted or sensitive ones must be left out. When the schema shows no table of a join with the column, the unqualified 0.0.1 filter is used, so it binds to whichever table or derived table really has it. Numbers are inlined; strings are quoted with `'` doubled (and `\` doubled on MySQL); any other value throws `SECURITY_VALIDATION_FAILED`.
+Each UNION, INTERSECT and EXCEPT branch gets its own filter. A user table on the nullable side of an outer join is wrapped rather than filtered in WHERE, so outer joins keep their unmatched rows. A wrapped table lists its columns only when restricted or sensitive ones must be left out. When the schema shows no table of a join with the column, the unqualified 0.0.1 filter is used, so it binds to whichever table or derived table really has it. Numbers are inlined; strings are quoted with `'` doubled (and `\` doubled on MySQL); any other value throws `SECURITY_VALIDATION_FAILED`.
 
 Know its limits:
 
