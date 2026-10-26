@@ -50,6 +50,8 @@ describe('hints and dialect clauses keep tables and calls', () => {
     expect(functions('SELECT id FROM t WITH (INDEX(xp_cmdshell(1)))', 'mssql')).toContain('XP_CMDSHELL');
     expect(functions('SELECT id FROM t USE INDEX (sleep(1))', 'mysql')).toContain('SLEEP');
     expect(functions("SELECT id FROM t FOR XML PATH(''), ROOT('r')", 'mssql')).toEqual([]);
+    expect(functions("SELECT id FROM t FOR XML PATH(xp_cmdshell('dir'))", 'mssql')).toEqual(['XP_CMDSHELL']);
+    expect(functions('SELECT * FROM s PIVOT (SUM(v) FOR k IN ([a])) AS p WHERE pg_sleep(1) = 1', 'mssql')).toContain('PG_SLEEP');
   });
 
   it('`alias = expr` names a select item only on SQL Server', () => {
